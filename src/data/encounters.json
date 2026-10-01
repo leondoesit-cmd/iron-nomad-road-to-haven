@@ -1,0 +1,100 @@
+{
+  "encounters": [
+    {
+      "id": "stranded_family",
+      "biome": "wasteland",
+      "choices": [
+        { "id": "help", "effects": { "stocks": { "fuel": -3, "rations": -2 }, "axes": { "mercy": 2, "trust": 1 }, "loyalty": 1 } },
+        { "id": "rob", "effects": { "stocks": { "fuel": 4, "rations": 3, "scrap": 6 }, "axes": { "mercy": -2, "notoriety": 2 }, "loyalty": -2 } },
+        { "id": "leave", "effects": { "axes": { "mercy": -1 } } }
+      ]
+    },
+    {
+      "id": "wounded_raider",
+      "biome": "wasteland",
+      "choices": [
+        { "id": "patch", "effects": { "stocks": { "medicine": -1 }, "axes": { "mercy": 2 } } },
+        { "id": "strip", "effects": { "stocks": { "scrap": 12, "tech": 1 }, "axes": { "notoriety": 1 } } },
+        { "id": "finish", "effects": { "stocks": { "scrap": 8 }, "axes": { "mercy": -2, "notoriety": 3 }, "loyalty": -2 } }
+      ]
+    },
+    {
+      "id": "toll_road",
+      "biome": "wasteland",
+      "choices": [
+        { "id": "pay", "effects": { "stocks": { "scrap": -15 }, "axes": { "trust": 1 } } },
+        { "id": "fight", "effects": { "ambush": 2, "axes": { "notoriety": 2 } } },
+        { "id": "bluff", "effects": { "axes": { "notoriety": 1, "trust": -1 }, "chance": { "p": 0.5, "fail": { "ambush": 2 } } } }
+      ]
+    },
+    {
+      "id": "radio_tower",
+      "biome": "wasteland",
+      "choices": [
+        { "id": "climb", "effects": { "stocks": { "tech": 6 }, "axes": { "trust": 0 }, "fragment": true, "zombies": 6 } },
+        { "id": "skip", "effects": {} }
+      ]
+    },
+    {
+      "id": "buried_cache",
+      "biome": "wasteland",
+      "choices": [
+        { "id": "dig", "effects": { "stocks": { "fuel": 5, "scrap": 20, "parts": 6 } } },
+        { "id": "mark", "effects": { "axes": { "trust": 1 } } }
+      ]
+    },
+    {
+      "id": "dying_trader",
+      "biome": "wasteland",
+      "choices": [
+        { "id": "buy", "effects": { "stocks": { "scrap": -20, "parts": 14, "tech": 3 }, "axes": { "trust": 1 } } },
+        { "id": "comfort", "effects": { "stocks": { "rations": -1, "parts": 6 }, "axes": { "mercy": 2 } } },
+        { "id": "take", "effects": { "stocks": { "parts": 18, "tech": 4, "scrap": 10 }, "axes": { "mercy": -2, "notoriety": 2 }, "loyalty": -2 } }
+      ]
+    },
+    {
+      "id": "orphan_cart",
+      "biome": "wasteland",
+      "choices": [
+        { "id": "share", "effects": { "stocks": { "rations": -3 }, "axes": { "mercy": 3, "trust": 1 }, "loyalty": 2 } },
+        { "id": "direct", "effects": { "axes": { "mercy": 1 } } },
+        { "id": "ignore", "effects": { "axes": { "mercy": -2 } } }
+      ]
+    },
+    {
+      "id": "pharmacy_looters",
+      "biome": "city",
+      "choices": [
+        { "id": "negotiate", "effects": { "stocks": { "rations": -2 }, "axes": { "trust": 1 }, "loyalty": 1 } },
+        { "id": "drive_off", "effects": { "stocks": { "medicine": 3 }, "axes": { "notoriety": 2, "mercy": -1 }, "zombies": 8 } },
+        { "id": "join", "effects": { "stocks": { "medicine": 2, "rations": 2 }, "axes": { "trust": -1 } } }
+      ]
+    },
+    {
+      "id": "survivors_cellar",
+      "biome": "city",
+      "choices": [
+        { "id": "rescue", "effects": { "stocks": { "medicine": -1, "rations": -2 }, "axes": { "mercy": 3, "trust": 1 }, "loyalty": 2, "zombies": 5 } },
+        { "id": "supplies", "effects": { "stocks": { "rations": 3, "medicine": 1 }, "axes": { "mercy": -1, "notoriety": 1 } } },
+        { "id": "ignore", "effects": { "axes": { "mercy": -2 } } }
+      ]
+    },
+    {
+      "id": "wreck_salvage",
+      "biome": "city",
+      "choices": [
+        { "id": "strip", "effects": { "stocks": { "parts": 16, "scrap": 14 }, "axes": { "mercy": -1 } } },
+        { "id": "grave", "effects": { "stocks": { "parts": 6 }, "axes": { "mercy": 1, "trust": 1 } } }
+      ]
+    },
+    {
+      "id": "lost_courier",
+      "biome": "city",
+      "choices": [
+        { "id": "escort", "effects": { "stocks": { "tech": 4, "medicine": 1 }, "axes": { "mercy": 2, "trust": 2 }, "zombies": 8, "fragment": true } },
+        { "id": "directions", "effects": { "axes": { "mercy": 1 } } },
+        { "id": "rob", "effects": { "stocks": { "tech": 6, "rations": 2 }, "axes": { "mercy": -3, "notoriety": 3 }, "loyalty": -3 } }
+      ]
+    }
+  ]
+}

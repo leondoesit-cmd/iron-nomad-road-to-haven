@@ -1,0 +1,103 @@
+import RAPIER from '@dimforge/rapier3d-compat';
+
+export { RAPIER };
+export type Collider = RAPIER.Collider;
+export type RigidBody = RAPIER.RigidBody;
+
+/** Interaction groups. Upper 16 bits are memberships, lower 16 bits are the filter. */
+export const G = {
+  STATIC: 0x0001,
+  VEHICLE: 0x0002,
+  PLAYER: 0x0004,
+  PROP: 0x0008,
+  SENSOR: 0x0010,
+  BUILD: 0x0020,
+} as const;
+
+export const groups = (member: number, filter: number) => ((member & 0xffff) << 16) | (filter & 0xffff);
+
+export const GROUPS = {
+  /** Terrain, buildings, barricades. */
+  static: groups(G.STATIC, G.VEHICLE | G.PLAYER | G.PROP),
+  /** Chassis: collides with static, other vehicles, players and props. */
+  vehicle: groups(G.VEHICLE, G.STATIC | G.VEHICLE | G.PLAYER | G.PROP | G.BUILD),
+  /** Capsule: collides with static, vehicles and built structures. */
+  player: groups(G.PLAYER, G.STATIC | G.VEHICLE | G.BUILD),
+  prop: groups(G.PROP, G.STATIC | G.VEHICLE),
+  /** Camp structures (blocking elements). */
+  build: groups(G.BUILD, G.VEHICLE | G.PLAYER),
+  /** What wheel rays can hit. */
+  wheelRays: groups(0xffff, G.STATIC | G.BUILD),
+};
+
+let ready: Promise<void> | null = null;
+export function initPhysics() {
+  if (!ready) ready = RAPIER.init();
+  return ready;
+}
+
+export const FIXED_STEP = 1 / 60;
+
+export class PhysicsWorld {
+  world: RAPIER.World;
+  private pending: (() => void)[] = [];
+
+  constructor() {
+    this.world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+    this.world.timestep = FIXED_STEP;
+    this.world.integrationParameters.numSolverIterations = 6;
+  }
+
+  step() {
+    this.world.step();
+    // Removals queued during gameplay callbacks apply after the step.
+    if (this.pending.length) {
+      const q = this.pending;
+      this.pending = [];
+      for (const f of q) f();
+    }
+  }
+
+  later(fn: () => void) {
+    this.pending.push(fn);
+  }
+
+  /** Static axis-aligned or yawed box. Positions are the centre. */
+  addStaticBox(cx: number, cy: number, cz: number, hx: number, hy: number, hz: number, yaw = 0, collisionGroups = GROUPS.static): Collider {
+    const desc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
+      .setTranslation(cx, cy, cz)
+      .setCollisionGroups(collisionGroups)
+      .setFriction(0.8);
+    if (yaw) desc.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) });
+    return this.world.createCollider(desc);
+  }
+
+  /**
+   * Heightfield over [x0, x0+size] x [z0, z0+size]. `heights` is (n+1)*(n+1) in column-major order:
+   * index = col*(n+1)+row with col along x and row along z. Verified against Rapier 0.21.
+   */
+  addHeightfield(x0: number, z0: number, size: number, n: number, heights: Float32Array): Collider {
+    const desc = RAPIER.ColliderDesc.heightfield(n, n, heights, { x: size, y: 1, z: size })
+      .setTranslation(x0 + size / 2, 0, z0 + size / 2)
+      .setCollisionGroups(GROUPS.static)
+      .setFriction(0.9);
+    return this.world.createCollider(desc);
+  }
+
+  removeCollider(c: Collider) {
+    this.world.removeCollider(c, false);
+  }
+
+  /** Cast a ray. Returns distance or null. */
+  raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, filter = groups(0xffff, G.STATIC | G.VEHICLE | G.BUILD), exclude?: RigidBody) {
+    const ray = new RAPIER.Ray({ x: ox, y: oy, z: oz }, { x: dx, y: dy, z: dz });
+    const hit = this.world.castRayAndGetNormal(ray, maxDist, true, undefined, filter, undefined, exclude);
+    if (!hit) return null;
+    return { toi: hit.timeOfImpact, normal: hit.normal, collider: hit.collider };
+  }
+
+  groundHeight(x: number, z: number, fromY = 200): number | null {
+    const r = this.raycast(x, fromY, z, 0, -1, 0, fromY + 50, groups(0xffff, G.STATIC));
+    return r ? fromY - r.toi : null;
+  }
+}

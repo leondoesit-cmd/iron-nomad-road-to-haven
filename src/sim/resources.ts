@@ -1,0 +1,157 @@
+import { STOCK_IDS, VEHICLES, vehicleDef, type Cost, type ModuleSlot, type StockId, type Stocks } from '../data';
+
+export function newStocks(init?: Partial<Stocks>): Stocks {
+  return { fuel: 0, rations: 0, scrap: 0, parts: 0, tech: 0, medicine: 0, ...init };
+}
+
+/** Costs may use the doc's "fu" shorthand for fuel. */
+function normalize(cost: Cost): Partial<Stocks> {
+  const out: Partial<Stocks> = {};
+  for (const k in cost) {
+    const v = (cost as Record<string, number>)[k];
+    if (!v) continue;
+    const id = (k === 'fu' ? 'fuel' : k) as StockId;
+    out[id] = (out[id] ?? 0) + v;
+  }
+  return out;
+}
+
+export function canAfford(s: Stocks, cost: Cost): boolean {
+  const c = normalize(cost);
+  for (const id of STOCK_IDS) if ((c[id] ?? 0) > s[id] + 1e-6) return false;
+  return true;
+}
+
+/** Atomic: either the whole cost is paid or nothing changes. */
+export function spend(s: Stocks, cost: Cost): boolean {
+  if (!canAfford(s, cost)) return false;
+  const c = normalize(cost);
+  for (const id of STOCK_IDS) s[id] = Math.max(0, s[id] - (c[id] ?? 0));
+  return true;
+}
+
+export function gain(s: Stocks, delta: Partial<Stocks>) {
+  for (const id of STOCK_IDS) if (delta[id]) s[id] = Math.max(0, s[id] + (delta[id] as number));
+}
+
+export function whole(v: number) {
+  return Math.floor(v + 1e-6);
+}
+
+export function costText(cost: Cost): string {
+  const c = normalize(cost);
+  const parts: string[] = [];
+  for (const id of STOCK_IDS) if (c[id]) parts.push(`${c[id]} ${LABEL[id]}`);
+  return parts.join(' · ') || 'Free';
+}
+
+export const LABEL: Record<StockId, string> = {
+  fuel: 'Fuel',
+  rations: 'Rations',
+  scrap: 'Scrap',
+  parts: 'Parts',
+  tech: 'Tech',
+  medicine: 'Medicine',
+};
+
+export interface CrewCut {
+  id: string;
+  cut: number;
+}
+
+/** Net loot = gross × (1 − Σ crew cuts). The withheld share is held in escrow for each crew member. */
+export function splitLoot(gross: Partial<Stocks>, crew: CrewCut[]) {
+  const raw = crew.reduce((a, c) => a + c.cut, 0);
+  const total = Math.min(0.9, raw);
+  const scale = raw > 0.9 ? 0.9 / raw : 1; // never let the crew take more than 90%
+  const net: Partial<Stocks> = {};
+  const owed: Record<string, Partial<Stocks>> = {};
+  for (const c of crew) owed[c.id] = {};
+  for (const id of STOCK_IDS) {
+    const g = gross[id];
+    if (!g) continue;
+    net[id] = g * (1 - total);
+    for (const c of crew) (owed[c.id] as Partial<Stocks>)[id] = g * c.cut * scale;
+  }
+  return { net, owed, total };
+}
+
+export function totalCuts(crew: CrewCut[]) {
+  return crew.reduce((a, c) => a + c.cut, 0);
+}
+
+// ---------------------------------------------------------------- upgrades
+
+export interface UpgradeCheck {
+  ok: boolean;
+  reason?: string;
+  cost: Cost;
+}
+
+/** The `upgrade` block on tier N holds the cost to rebuild N into N+1. */
+export function tierUpCost(fromTier: number) {
+  const cur = VEHICLES.tiers[fromTier - 1];
+  const next = VEHICLES.tiers[fromTier];
+  if (!cur || !next) return null;
+  const u = cur.upgrade;
+  const cost: Cost = {};
+  if (u.parts) cost.parts = u.parts;
+  if (u.scrap) cost.scrap = u.scrap;
+  if (u.tech) cost.tech = u.tech;
+  return { cost, chassis: u.chassis, needsGarage: !!u.needsGarage, beta: !!next.beta, target: next };
+}
+
+export function checkTierUp(stocks: Stocks, fromTier: number, chassis: number, atGarage: boolean, maxTier = 3): UpgradeCheck {
+  const info = tierUpCost(fromTier);
+  if (!info) return { ok: false, reason: 'Already at the top tier', cost: {} };
+  if (info.target.tier > maxTier || info.beta) return { ok: false, reason: 'Arrives in the Beta', cost: info.cost };
+  if (info.needsGarage && !atGarage) return { ok: false, reason: 'Needs a Waypoint garage', cost: info.cost };
+  if (info.chassis > chassis) return { ok: false, reason: `Needs a salvaged chassis (${chassis}/${info.chassis})`, cost: info.cost };
+  if (!canAfford(stocks, info.cost)) return { ok: false, reason: 'Not enough stock', cost: info.cost };
+  return { ok: true, cost: info.cost };
+}
+
+export function moduleCost(level: number): Cost | null {
+  const l = VEHICLES.modules.levels[level]; // upgrading from `level` to `level+1`
+  if (!l) return null;
+  const c: Cost = {};
+  if (l.parts) c.parts = l.parts;
+  if (l.scrap) c.scrap = l.scrap;
+  if (l.tech) c.tech = l.tech;
+  return c;
+}
+
+export type ModuleLevels = Record<ModuleSlot, number>;
+export const emptyModules = (): ModuleLevels => ({ engine: 0, armor: 0, wheels: 0, weapon: 0, utility: 0 });
+
+/** Stats a vehicle gets from its tier plus module levels. Pure so it can be tested. */
+export function effectiveStats(tier: number, mods: ModuleLevels) {
+  const d = vehicleDef(tier);
+  const p = VEHICLES.modules.perLevel;
+  return {
+    forceMult: 1 + p.engine.force * mods.engine,
+    topSpeedMult: 1 + p.engine.topSpeed * mods.engine,
+    armor: Math.min(0.9, d.armor + p.armor.armor * mods.armor),
+    gripMult: 1 + p.wheels.grip * mods.wheels,
+    travelMult: 1 + p.wheels.travel * mods.wheels,
+    damageMult: 1 + p.weapon.damage * mods.weapon,
+    tank: d.tank * (1 + p.utility.tank * mods.utility),
+    cargo: d.cargo + p.utility.cargo * mods.utility,
+  };
+}
+
+// ---------------------------------------------------------------- crafting
+
+export interface Recipe {
+  id: string;
+  name: string;
+  cost: Cost;
+  yields: { ammo?: number; medkit?: number; molotov?: number; flare?: number; charge?: number };
+}
+export const RECIPES: Recipe[] = [
+  { id: 'ammo', name: 'Ammo (30 rounds)', cost: { scrap: 5 }, yields: { ammo: 30 } },
+  { id: 'medkit', name: 'Medkit', cost: { medicine: 2 }, yields: { medkit: 1 } },
+  { id: 'molotov', name: 'Molotov', cost: { fuel: 1 }, yields: { molotov: 1 } },
+  { id: 'flare', name: 'Flare', cost: { tech: 1 }, yields: { flare: 2 } },
+  { id: 'charge', name: 'Breaching charge', cost: { tech: 5, scrap: 4 }, yields: { charge: 1 } },
+];

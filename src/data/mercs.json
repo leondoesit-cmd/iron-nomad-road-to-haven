@@ -1,0 +1,56 @@
+{
+  "roles": {
+    "mechanic": {
+      "name": "Mechanic",
+      "available": true,
+      "signOn": { "scrap": 80, "parts": 20 },
+      "upkeep": { "rations": 1, "fu": 0 },
+      "defaultCut": 0.1,
+      "stars": 2,
+      "repairHalted": 5,
+      "repairMoving": 2,
+      "blurb": "Repairs the nearest damaged vehicle, crafts ammo in camp. No combat skill; stops repairing under fire."
+    },
+    "scout": {
+      "name": "Scout / Outrunner",
+      "available": false,
+      "signOn": { "scrap": 60, "tech": 10 },
+      "upkeep": { "rations": 1, "fu": 2 },
+      "defaultCut": 0.08,
+      "stars": 2,
+      "blurb": "Rides ahead and reveals ambushes and minefields. Beta."
+    },
+    "scavenger": {
+      "name": "Scavenger",
+      "available": false,
+      "signOn": { "scrap": 40 },
+      "upkeep": { "rations": 1, "fu": 1 },
+      "defaultCut": 0.15,
+      "stars": 2,
+      "blurb": "Loots ruins on a Loot Run ping. Beta."
+    },
+    "vanguard": {
+      "name": "Heavy Vanguard",
+      "available": false,
+      "signOn": { "scrap": 120, "parts": 40, "tech": 20 },
+      "upkeep": { "rations": 1, "fu": 3 },
+      "defaultCut": 0.12,
+      "stars": 3,
+      "blurb": "Armored escort that draws all aggro. Beta."
+    }
+  },
+  "names": ["Tinker", "Mags", "Dutch", "Pike", "Sparrow", "Hollis", "Wren", "Cobb", "Juno", "Rafe"],
+  "loyalty": {
+    "paidInFull": 2,
+    "missedUpkeep": -10,
+    "cutShorted": -15,
+    "stranded": -20,
+    "savedByPlayer": 10,
+    "riskyNoPay": -5,
+    "wonRaid": 3,
+    "restDay": 5,
+    "bands": { "loyal": 70, "steady": 40, "resentful": 20, "mutinous": 10 },
+    "warn1": 35,
+    "refuse": 25
+  }
+}

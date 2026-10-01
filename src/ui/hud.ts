@@ -1,0 +1,531 @@
+import { t } from '../data';
+import { LABEL, whole } from '../sim/resources';
+import { loyaltyBand } from '../sim/loyalty';
+import { formatClock, wrapAngle, clamp } from '../core/math';
+import { PLAYER_CSS } from '../render/palette';
+import type { Scene, CompassPin } from '../game/scene';
+import type { LegScene } from '../game/legScene';
+import type { CampScene } from '../game/campScene';
+import type { Player } from '../game/player';
+import type { Slot } from '../input/input';
+
+const KEY_LABEL: Record<1 | 2, Record<string, string>> = {
+  1: { A: 'G', Y: 'R', X: 'T', RT: 'F', RB: 'F', B: 'C', LB: 'V' },
+  2: { A: '/', Y: 'Enter', X: ',', RT: 'R-Shift', RB: 'R-Shift', B: '.', LB: 'N' },
+};
+export function btnLabel(slot: Slot | null, btn: string): string {
+  if (slot?.kind === 'kb') return KEY_LABEL[slot.set][btn] ?? btn;
+  return btn;
+}
+
+const PIN_COLOR: Record<CompassPin['kind'], string> = {
+  end: '#ffe08a',
+  encounter: '#ff9a4a',
+  zone: '#8ad8ff',
+  ping: '#ffffff',
+  ambush: '#ff4a3a',
+  camp: '#ffe08a',
+  fragment: '#3ad0ff',
+  chassis: '#3aa0ff',
+  threat: '#ff4a3a',
+  watch: '#7ddc7a',
+  sector: '#ffb454',
+  hub: '#ffe08a',
+};
+
+class PlayerHud {
+  root: HTMLElement;
+  private q = new Map<string, HTMLElement>();
+  private last = new Map<string, string>();
+  private compass: HTMLCanvasElement;
+  private cctx: CanvasRenderingContext2D;
+  private dpr = 1;
+  constructor(
+    host: HTMLElement,
+    public index: number,
+  ) {
+    const color = PLAYER_CSS[index];
+    host.innerHTML = `
+    <div class="hud" style="--pc:${color}">
+      <div class="gray" data-k="gray"></div>
+      <div class="vignette" data-k="vig"></div>
+      <div class="corner tl">
+        <div class="tag"><span class="pcolor" style="background:${color}"></span><span data-k="name"></span></div>
+        <div class="sigrow"><div class="sig" data-k="sigbar"><div class="fill" data-k="sigfill"></div></div><span class="val" data-k="sigval">0</span></div>
+        <div class="tag" data-k="siglabel">NOISE</div>
+        <div class="chips" data-k="chips"></div>
+      </div>
+      <div class="corner tr">
+        <canvas class="compass" data-k="compass"></canvas>
+        <div class="legbar" data-k="legbar"><div class="fill" data-k="legfill"></div><div class="dusk" data-k="legdusk"></div><div class="me" data-k="legme"></div></div>
+        <div class="tag"><span class="clock" data-k="clock"></span> <span data-k="daytag"></span></div>
+      </div>
+      <div class="corner bl">
+        <div class="tag" data-k="vname">ON FOOT</div>
+        <div class="bar" data-k="hpbar"><div class="fill" data-k="hpfill"></div></div>
+        <div class="row" data-k="fuelrow"><div class="bar fuel" data-k="fuelbar"><div class="fill" data-k="fuelfill"></div></div><span class="val" data-k="fuelval"></span></div>
+        <div class="row"><div class="speed" data-k="speed">0<small>km/h</small></div><div class="comp" data-k="comp"></div></div>
+      </div>
+      <div class="corner br">
+        <div class="tag" data-k="wname">PISTOL</div>
+        <div class="ammo" data-k="ammo">12<small>/90</small></div>
+        <div class="equip" data-k="equip"></div>
+        <div class="tag" data-k="stocks"></div>
+      </div>
+      <div class="bc">
+        <div class="notes" data-k="notes"></div>
+        <div class="prompt" data-k="prompt"><span class="btn" data-k="pbtn">A</span><span data-k="ptext"></span><div class="hold" data-k="phold"></div></div>
+      </div>
+      <div class="reticle" data-k="reticle"></div>
+      <div class="msgs"><div class="sub" data-k="sub"></div><div class="tipbox" data-k="tip"></div></div>
+      <div class="banner" data-k="banner"></div>
+      <div class="tether" data-k="tether">PARTNER TOO FAR: REGROUP</div>
+      <div class="center-msg" data-k="cmsg"><div class="big" data-k="cbig"></div><div class="small" data-k="csmall"></div></div>
+      <div class="wheel" data-k="wheel"></div>
+      <div class="sheet" data-k="sheet"></div>
+      <div class="build-hud" data-k="build"></div>
+      <div class="disc" data-k="disc"><div><h2 data-k="dtitle">CONTROLLER DISCONNECTED</h2><p>Reconnect the pad or press a key to continue.</p></div></div>
+    </div>`;
+    this.root = host.firstElementChild as HTMLElement;
+    host.querySelectorAll<HTMLElement>('[data-k]').forEach((el) => this.q.set(el.dataset.k!, el));
+    this.compass = this.q.get('compass') as unknown as HTMLCanvasElement;
+    this.cctx = this.compass.getContext('2d')!;
+    this.q.get('name')!.textContent = '';
+  }
+
+  el(k: string) {
+    return this.q.get(k)!;
+  }
+
+  setText(k: string, v: string) {
+    if (this.last.get(k) === v) return;
+    this.last.set(k, v);
+    this.q.get(k)!.textContent = v;
+  }
+  setHtml(k: string, v: string) {
+    if (this.last.get(k) === v) return;
+    this.last.set(k, v);
+    this.q.get(k)!.innerHTML = v;
+  }
+  setStyle(k: string, prop: string, v: string) {
+    const key = `${k}:${prop}`;
+    if (this.last.get(key) === v) return;
+    this.last.set(key, v);
+    (this.q.get(k)!.style as unknown as Record<string, string>)[prop] = v;
+  }
+  setClass(k: string, v: string) {
+    const key = `${k}:class`;
+    if (this.last.get(key) === v) return;
+    this.last.set(key, v);
+    const base = this.q.get(k)!.dataset.base ?? (this.q.get(k)!.dataset.base = this.q.get(k)!.className.split(' ')[0]);
+    this.q.get(k)!.className = `${base} ${v}`.trim();
+  }
+
+  drawCompass(camYaw: number, pins: CompassPin[], from: { x: number; z: number }, partner: { x: number; z: number } | null, pcolor: string, partnerColor: string, scale: number) {
+    const c = this.compass;
+    // Fit the compass to the half it lives in so the corners never collide in a narrow left/right view.
+    const hostW = this.root.clientWidth || 640;
+    const W = Math.round(Math.max(150, Math.min(320 * scale, hostW * 0.46)));
+    const H = Math.round(46 * scale);
+    c.style.width = `${W}px`;
+    c.style.height = `${H}px`;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (this.dpr !== dpr || c.width !== W * dpr) {
+      this.dpr = dpr;
+      c.width = W * dpr;
+      c.height = H * dpr;
+    }
+    const g = this.cctx;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+    g.fillStyle = 'rgba(12,9,6,0.62)';
+    g.fillRect(0, 0, W, H);
+    g.strokeStyle = 'rgba(255,180,84,0.35)';
+    g.strokeRect(0.5, 0.5, W - 1, H - 1);
+    const half = Math.PI * 0.62; // visible half-range
+    const xOf = (rel: number) => W / 2 - (rel / half) * (W / 2);
+    // Ticks every 15 degrees, letters at cardinals.
+    g.font = `${Math.round(13 * scale)}px Oswald, sans-serif`;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    for (let a = 0; a < 360; a += 15) {
+      const abs = (a * Math.PI) / 180;
+      const rel = wrapAngle(abs - camYaw);
+      if (Math.abs(rel) > half) continue;
+      const x = xOf(rel);
+      const card = a % 90 === 0;
+      g.strokeStyle = card ? 'rgba(255,225,160,0.95)' : 'rgba(255,180,84,0.4)';
+      g.beginPath();
+      g.moveTo(x, H - 4);
+      g.lineTo(x, H - (card ? 14 : 9));
+      g.stroke();
+      if (card) {
+        g.fillStyle = a === 0 ? '#ffe08a' : '#e9dfc7';
+        // North is +Z (down the road). 0 = N, 90 deg (toward -X) is W because +X is left when facing +Z.
+        const label = a === 0 ? 'N' : a === 90 ? 'W' : a === 180 ? 'S' : 'E';
+        g.fillText(label, x, H - 24);
+      }
+    }
+    // Pins
+    for (const pin of pins) {
+      const dx = pin.x - from.x;
+      const dz = pin.z - from.z;
+      const d = Math.hypot(dx, dz);
+      if (d < 6) continue;
+      const rel = wrapAngle(Math.atan2(dx, dz) - camYaw);
+      const x = clamp(xOf(rel), 10, W - 10);
+      const edge = Math.abs(rel) > half;
+      g.fillStyle = PIN_COLOR[pin.kind];
+      g.globalAlpha = edge ? 0.55 : 1;
+      if (pin.kind === 'ambush') {
+        g.beginPath();
+        g.moveTo(x, 6);
+        g.lineTo(x + 5, 15);
+        g.lineTo(x - 5, 15);
+        g.closePath();
+        g.fill();
+      } else if (pin.kind === 'ping') {
+        g.beginPath();
+        g.arc(x, 11, 5, 0, Math.PI * 2);
+        g.lineWidth = 2;
+        g.strokeStyle = '#fff';
+        g.stroke();
+        g.lineWidth = 1;
+      } else {
+        g.fillRect(x - 4, 7, 8, 8);
+      }
+      g.globalAlpha = 1;
+      if (pin.label && d < 900 && !edge) {
+        g.fillStyle = '#e9dfc7';
+        g.font = `${Math.round(10 * scale)}px Share Tech Mono, monospace`;
+        g.fillText(pin.label.length > 5 ? pin.label.slice(0, 5) : pin.label, x, 24);
+        g.font = `${Math.round(13 * scale)}px Oswald, sans-serif`;
+      }
+    }
+    // Partner arrow in their colour, with distance.
+    if (partner) {
+      const dx = partner.x - from.x;
+      const dz = partner.z - from.z;
+      const d = Math.hypot(dx, dz);
+      const rel = wrapAngle(Math.atan2(dx, dz) - camYaw);
+      const x = clamp(xOf(rel), 12, W - 12);
+      g.fillStyle = partnerColor;
+      g.beginPath();
+      g.moveTo(x, 4);
+      g.lineTo(x + 7, 17);
+      g.lineTo(x - 7, 17);
+      g.closePath();
+      g.fill();
+      g.strokeStyle = '#000';
+      g.stroke();
+      g.fillStyle = partnerColor;
+      g.font = `${Math.round(11 * scale)}px Share Tech Mono, monospace`;
+      g.fillText(`${Math.round(d)}m`, x, 28);
+    }
+    g.strokeStyle = pcolor;
+    g.beginPath();
+    g.moveTo(W / 2, 0);
+    g.lineTo(W / 2, 7);
+    g.stroke();
+  }
+}
+
+export interface HudExtras {
+  /** Elapsed fraction of the day for the leg bar and its Dusk marker. */
+  legProgress?: (p: Player) => { frac: number; dusk: number; label: string } | null;
+}
+
+/** Corner-only HUD for each half: Signature, compass, vehicle/player status, weapon, context prompt. */
+export class Hud {
+  huds: PlayerHud[];
+  private acc = 0;
+  private subTimer = 0;
+  private tipTimer = 0;
+  private bannerTimer = 0;
+  uiScale = 1;
+  wheelSel = [-1, -1];
+  private tipText = '';
+  private subText = '';
+  private bannerTitle = '';
+  private bannerSub = '';
+  disconnected: [boolean, boolean] = [false, false];
+
+  constructor(public halves: HTMLElement[]) {
+    this.huds = halves.map((h, i) => new PlayerHud(h, i));
+  }
+
+  setLayout(l: 'horizontal' | 'vertical') {
+    const cls = l === 'horizontal' ? ['h-top', 'h-bottom'] : ['v-left', 'v-right'];
+    this.halves.forEach((h, i) => (h.className = `half ${cls[i]}`));
+    const div = document.getElementById('divider');
+    if (div) div.className = l === 'horizontal' ? 'h' : 'v';
+  }
+
+  setScale(s: number) {
+    this.uiScale = s;
+    document.documentElement.style.setProperty('--u', String(s));
+  }
+
+  showSub(text: string, secs = 6) {
+    this.subText = text;
+    this.subTimer = secs;
+  }
+  showTip(text: string, secs = 9) {
+    this.tipText = text;
+    this.tipTimer = secs;
+  }
+  showBanner(title: string, sub = '', secs = 6) {
+    this.bannerTitle = title;
+    this.bannerSub = sub;
+    this.bannerTimer = secs;
+  }
+
+  setVisible(v: boolean) {
+    for (const h of this.huds) h.root.style.display = v ? '' : 'none';
+  }
+
+  update(scene: Scene | null, dt: number, slots: (Slot | null)[], extras: HudExtras = {}) {
+    this.subTimer -= dt;
+    this.tipTimer -= dt;
+    this.bannerTimer -= dt;
+    this.acc += dt;
+    if (!scene) return;
+    if (this.acc < 0.05) return;
+    const step = this.acc;
+    this.acc = 0;
+    void step;
+    const pins = scene.compassPins();
+    const leg = scene.mode === 'leg' ? (scene as LegScene) : null;
+    for (let i = 0; i < 2; i++) {
+      const h = this.huds[i];
+      const p = scene.players[i];
+      if (!p) continue;
+      this.updateOne(h, p, scene, pins, leg, slots[i] ?? null, extras);
+    }
+  }
+
+  private updateOne(h: PlayerHud, p: Player, scene: Scene, pins: CompassPin[], leg: LegScene | null, slot: Slot | null, extras: HudExtras) {
+    const camp = scene.campaign;
+    const v = p.vehicle;
+    const partner = scene.players[1 - p.index];
+    h.setText('name', p.name.toUpperCase());
+    // Signature
+    const sig = p.signatureShown;
+    h.setStyle('sigfill', 'width', `${clamp(sig, 0, 100)}%`);
+    h.setClass('sigbar', sig >= 60 ? 'high' : sig >= 30 ? 'mid' : '');
+    h.setText('sigval', String(Math.round(sig)));
+    h.setText('siglabel', scene.biome === 'city' ? 'NOISE · HEARD IN CITIES' : 'DUST · SEEN ON THE ROAD');
+    const chips: string[] = [];
+    if (leg && leg.gap > 150) chips.push(`<span class="chip ${leg.gap > 250 ? 'bad' : 'warn'}">PARTNER ${Math.round(leg.gap)}m</span>`);
+    if (scene.night > 0.4) chips.push('<span class="chip warn">NIGHT: 2x SIGNATURE WITH LIGHTS</span>');
+    if (v && v.lights) chips.push('<span class="chip">LIGHTS</span>');
+    if (p.state === 'driving' && v && !v.engineOn) chips.push('<span class="chip">ENGINE OFF</span>');
+    if (p.pinned >= 2) chips.push('<span class="chip bad">PINNED</span>');
+    if (p.crouch && p.state === 'foot') chips.push('<span class="chip good">CROUCHED</span>');
+    if (leg && leg.hordeCountdown(p) > 0) chips.push(`<span class="chip bad">HORDE ${formatClock(leg.hordeCountdown(p))}</span>`);
+    h.setHtml('chips', chips.join(''));
+
+    // Compass
+    const cam = p.cam;
+    const cyaw = Math.atan2(cam.look.x - cam.pos.x, cam.look.z - cam.pos.z);
+    const myPos = { x: v ? v.position.x : p.pos.x, z: v ? v.position.z : p.pos.z };
+    const pp = partner ? (partner.vehicle ? partner.vehicle.position : partner.pos) : null;
+    h.drawCompass(cyaw, pins, myPos, pp ? { x: pp.x, z: pp.z } : null, PLAYER_CSS[p.index], PLAYER_CSS[1 - p.index], this.uiScale);
+
+    // Leg progress and clock
+    const prog = extras.legProgress?.(p);
+    if (leg) {
+      const L = leg.leg.length;
+      h.setStyle('legfill', 'width', `${clamp(myPos.z / L, 0, 1) * 100}%`);
+      h.setStyle('legme', 'left', `${clamp(myPos.z / L, 0, 1) * 100}%`);
+      h.setStyle('legdusk', 'left', '72%');
+      const sec = leg.clock.secondsToDark;
+      h.setText('clock', formatClock(sec));
+      h.setText('daytag', leg.clock.dusk ? (leg.clock.night ? 'NIGHT' : 'TO DARK') : 'TO DUSK BELL');
+      h.setStyle('legbar', 'display', '');
+    } else {
+      h.setStyle('legbar', 'display', 'none');
+      if (prog) h.setText('daytag', prog.label);
+    }
+    // Camp: build timer, phase, and the placement strip.
+    if (scene.mode === 'camp') {
+      const camp = scene as CampScene;
+      h.setText('clock', camp.phase === 'build' ? formatClock(camp.buildSecondsLeft) : '');
+      h.setText('daytag', camp.phase === 'build' ? 'BUILD · HOLD B WHEN READY' : camp.phase === 'night' ? 'NIGHT RAID' : camp.phase === 'dawn' ? 'DAWN' : 'LEDGER');
+      const html = camp.buildHud(p);
+      h.setStyle('build', 'display', html ? 'flex' : 'none');
+      h.setHtml('build', html);
+    } else h.setStyle('build', 'display', 'none');
+
+    // Vehicle / player status
+    const cur = v ?? p.ownVehicle;
+    if (v && (p.state === 'driving' || p.state === 'gunner')) {
+      h.setText('vname', v.def.name.toUpperCase());
+      const f = v.hpFrac;
+      h.setStyle('hpfill', 'width', `${f * 100}%`);
+      h.setClass('hpbar', f < 0.25 ? 'crit' : f < 0.55 ? 'low' : '');
+      h.setStyle('fuelrow', 'display', 'flex');
+      const ff = v.fuel / v.tankMax;
+      h.setStyle('fuelfill', 'width', `${clamp(ff, 0, 1) * 100}%`);
+      h.setClass('fuelbar', ff < 0.15 ? 'fuel crit' : 'fuel');
+      h.setText('fuelval', `${v.fuel.toFixed(1)}`);
+      h.setText('speed', `${Math.round(Math.abs(v.speed) * 3.6)}`);
+      h.el('speed').innerHTML = `${Math.round(Math.abs(v.speed) * 3.6)}<small>km/h</small>`;
+      const c = v.health.comp;
+      const cls = (x: number) => (x <= 0.001 ? 'bad' : x < 0.99 ? 'mid' : '');
+      h.setHtml(
+        'comp',
+        `<i class="${cls(c.engine)}" title="engine">E</i><i class="${c.tires.some((x) => x <= 0) ? 'bad' : ''}">T</i><i class="${v.health.leaking ? 'bad' : ''}">F</i><i class="${cls(c.mount)}">W</i>${v.health.burning ? '<i class="bad">🔥</i>' : ''}`,
+      );
+    } else if (p.state === 'foot' || p.state === 'entering' || p.state === 'downed' || p.state === 'dead') {
+      h.setText('vname', p.state === 'dead' ? 'DOWN FOR GOOD' : 'ON FOOT');
+      h.setStyle('hpfill', 'width', `${(p.hp / p.maxHp) * 100}%`);
+      h.setClass('hpbar', p.hp < 25 ? 'crit' : p.hp < 55 ? 'low' : '');
+      h.setStyle('fuelrow', 'display', cur && !cur.wreck ? 'flex' : 'none');
+      if (cur) {
+        const ff = cur.fuel / cur.tankMax;
+        h.setStyle('fuelfill', 'width', `${clamp(ff, 0, 1) * 100}%`);
+        h.setText('fuelval', cur.fuel.toFixed(1));
+      }
+      h.el('speed').innerHTML = `${Math.round(p.moveSpeed * 3.6)}<small>km/h</small>`;
+      h.setHtml('comp', '');
+    }
+
+    // Weapon block
+    const pad = slot?.kind === 'pad';
+    void pad;
+    if (p.state === 'driving' && v) {
+      if (v.def.weapon === 'frontLMG') {
+        h.setText('wname', 'FRONT LMG');
+        h.el('ammo').innerHTML = `${camp.ammo}<small> rds</small>`;
+      } else if (v.def.weapon === 'bedMG') {
+        h.setText('wname', 'BED MG · PARTNER GUNS');
+        h.el('ammo').innerHTML = `${camp.ammo}<small> rds</small>`;
+      } else {
+        h.setText('wname', 'UNARMED');
+        h.el('ammo').innerHTML = `—`;
+      }
+      h.setHtml('equip', `<span class="on">${btnLabel(slot, 'X')} HORN</span><span>${btnLabel(slot, 'B')} LIGHTS</span>`);
+    } else if (p.state === 'gunner' && v) {
+      h.setText('wname', 'BED MG');
+      h.el('ammo').innerHTML = `${camp.ammo}<small> rds</small>`;
+      h.setHtml('equip', '');
+    } else {
+      const eq = p.equip;
+      h.setText('wname', p.reloadT > 0 ? 'RELOADING' : eq === 'pistol' ? 'PISTOL' : eq === 'wrench' ? 'WRENCH' : eq === 'jerrycan' ? 'JERRYCAN' : p.utility.toUpperCase());
+      if (eq === 'pistol') h.el('ammo').innerHTML = `${p.mag}<small>/${camp.ammo}</small>`;
+      else if (eq === 'wrench') h.el('ammo').innerHTML = `<small>${whole(camp.stocks.scrap)} SCRAP</small>`;
+      else if (eq === 'jerrycan') h.el('ammo').innerHTML = `<small>${camp.stocks.fuel.toFixed(1)} FU</small>`;
+      else h.el('ammo').innerHTML = `<small>${p.utility === 'horn' ? '∞' : camp.items[p.utility as 'flare']}</small>`;
+      h.setHtml(
+        'equip',
+        `<span class="${eq === 'pistol' ? 'on' : ''}">GUN</span><span class="${eq === 'wrench' ? 'on' : ''}">WRENCH</span><span class="${eq === 'jerrycan' ? 'on' : ''}">CAN</span><span class="${eq === 'utility' ? 'on' : ''}">${p.utility.toUpperCase()}</span>`,
+      );
+    }
+    h.setText(
+      'stocks',
+      `FUEL ${camp.stocks.fuel.toFixed(0)} · RATIONS ${whole(camp.stocks.rations)} · SCRAP ${whole(camp.stocks.scrap)} · PARTS ${whole(camp.stocks.parts)}`,
+    );
+
+    // Notes
+    h.setHtml('notes', p.notes.slice(-3).map((n) => `<div class="note ${n.kind}">${escapeHtml(n.text)}</div>`).join(''));
+
+    // Prompt
+    const pr = p.prompt;
+    if (pr) {
+      h.setStyle('prompt', 'display', 'flex');
+      h.setText('ptext', pr.text);
+      h.setText('pbtn', btnLabel(slot, pr.button));
+      h.setClass('pbtn', pr.button === 'Y' ? 'y' : pr.button === 'X' ? 'x' : '');
+      h.setStyle('phold', 'width', pr.progress >= 0 ? `${clamp(pr.progress, 0, 1) * 100}%` : '0%');
+    } else h.setStyle('prompt', 'display', 'none');
+
+    // Reticle: on foot aiming or manning the bed gun.
+    const showRet = (p.state === 'foot' && p.equip === 'pistol') || p.state === 'gunner';
+    h.setStyle('reticle', 'display', showRet ? 'block' : 'none');
+    h.setStyle('reticle', 'transform', `scale(${1 + (1 - p.ads) * 0.4})`);
+
+    // Damage / downed overlays
+    const hurt = clamp(1 - p.hp / p.maxHp, 0, 1);
+    h.setStyle('vig', 'opacity', String(p.state === 'foot' ? hurt * 0.9 * (p.sinceHit < 0.6 ? 1 : 0.55) : p.state === 'driving' && v ? clamp(1 - v.hpFrac, 0, 1) * 0.6 : 0));
+    h.setClass('gray', p.state === 'downed' || p.state === 'dead' ? 'on' : '');
+
+    // Center messages
+    if (p.state === 'downed') {
+      h.setStyle('cmsg', 'display', 'block');
+      h.setText('cbig', 'YOU ARE DOWN');
+      h.setText('csmall', `Partner: hold ${btnLabel(slot === null ? null : null, 'A')} next to you to revive`);
+    } else if (p.pinned >= 2 && p.state === 'foot') {
+      h.setStyle('cmsg', 'display', 'block');
+      h.setText('cbig', 'PINNED');
+      h.setText('csmall', `Rotate the left stick (${Math.min(5, Math.round(p.pinBreak))}/5) or get your partner to shoot`);
+    } else if (p.state === 'dead') {
+      h.setStyle('cmsg', 'display', 'block');
+      h.setText('cbig', 'BLED OUT');
+      h.setText('csmall', 'Respawning at the convoy for a Scrap fee');
+    } else h.setStyle('cmsg', 'display', 'none');
+
+    // Shared messages
+    h.setStyle('sub', 'display', this.subTimer > 0 ? 'block' : 'none');
+    h.setText('sub', this.subText);
+    h.setStyle('tip', 'display', this.tipTimer > 0 ? 'block' : 'none');
+    h.setText('tip', this.tipText);
+    h.setStyle('banner', 'display', this.bannerTimer > 0 ? 'block' : 'none');
+    h.setHtml('banner', `${escapeHtml(this.bannerTitle)}<small>${escapeHtml(this.bannerSub)}</small>`);
+    h.setStyle('tether', 'display', p.tetherWarn ? 'block' : 'none');
+    h.setClass('disc', this.disconnected[p.index] ? 'on' : '');
+    this.updateWheel(h, p, slot);
+    this.updateSheet(h, p, scene, leg);
+  }
+
+  private updateWheel(h: PlayerHud, p: Player, slot: Slot | null) {
+    if (!p.commandWheel) {
+      h.setStyle('wheel', 'display', 'none');
+      return;
+    }
+    h.setStyle('wheel', 'display', 'block');
+    const names = ['PING', 'FOLLOW', 'REGROUP', 'SPREAD', 'HOLD'];
+    const pos = [[50, 6], [88, 38], [74, 86], [26, 86], [12, 38]];
+    const sel = this.wheelSel[p.index];
+    h.setHtml(
+      'wheel',
+      names
+        .map((n, i) => `<div class="${i === sel ? 'sel' : ''}" style="left:${pos[i][0]}%;top:${pos[i][1]}%;transform:translate(-50%,-50%)">${n}</div>`)
+        .join('') + `<div style="left:50%;top:50%;transform:translate(-50%,-50%);color:#b97d2c">CREW ORDERS</div>`,
+    );
+    void slot;
+  }
+
+  private updateSheet(h: PlayerHud, p: Player, scene: Scene, leg: LegScene | null) {
+    if (!p.sheet) {
+      h.setStyle('sheet', 'display', 'none');
+      return;
+    }
+    h.setStyle('sheet', 'display', 'block');
+    const c = scene.campaign;
+    const stocks = (['fuel', 'rations', 'scrap', 'parts', 'tech', 'medicine'] as const)
+      .map((k) => `<div>${LABEL[k].toUpperCase()} <b>${k === 'fuel' ? c.stocks[k].toFixed(1) : whole(c.stocks[k])}</b></div>`)
+      .join('');
+    const crew = c.crewLive.length
+      ? c.crewLive
+          .map((m) => {
+            const band = loyaltyBand(m.loyalty);
+            const face = band === 'loyal' ? '🙂' : band === 'steady' ? '😐' : band === 'resentful' ? '😠' : band === 'mutinous' ? '🤬' : '💀';
+            return `<div>${face} ${m.name.toUpperCase()} · ${m.role.toUpperCase()} · ${band.toUpperCase()} (${Math.round(m.loyalty)})<br><span style="opacity:.7;text-transform:none">${m.grievances[0] ?? 'No grievances'}</span></div>`;
+          })
+          .join('')
+      : '<div style="opacity:.7">No crew yet. Hire at a Waypoint.</div>';
+    const items = `FLARES ${c.items.flare} · MOLOTOVS ${c.items.molotov} · CHARGES ${c.items.charge} · MEDKITS ${c.items.medkit} · AMMO ${c.ammo}`;
+    const route = leg ? `${leg.leg.name.toUpperCase()} · ${Math.round(leg.leg.length - (p.vehicle?.position.z ?? p.pos.z))} m TO CAMP` : 'CAMP';
+    h.setHtml(
+      'sheet',
+      `<h4>CONVOY SHEET · ${route}</h4><div class="stocks">${stocks}</div><div style="margin-top:4px;font-family:var(--mono)">${items}</div><h4 style="margin-top:8px">CREW</h4><div class="crew">${crew}</div><div style="margin-top:6px;opacity:.7;font-family:var(--mono)">FRAGMENTS ${c.fragments.size}/4 · CHASSIS ${c.chassis}</div>`,
+    );
+  }
+}
+
+export function escapeHtml(s: string) {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
+void t;

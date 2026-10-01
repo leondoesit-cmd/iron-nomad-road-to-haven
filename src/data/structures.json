@@ -1,0 +1,127 @@
+{
+  "build": {
+    "buildSeconds": 180,
+    "snap": 1,
+    "elements": [
+      {
+        "id": "barricade",
+        "name": "Barricade panel",
+        "cost": { "scrap": 4 },
+        "size": [3, 1.6, 0.5],
+        "hp": 220,
+        "blocks": true,
+        "blurb": "Blocks lanes. Brutes and Battle-wagons break it fast."
+      },
+      {
+        "id": "wire",
+        "name": "Barbed wire (4 m)",
+        "cost": { "scrap": 2 },
+        "size": [4, 0.6, 1.0],
+        "hp": 60,
+        "blocks": false,
+        "slow": 0.6,
+        "dps": 5,
+        "blurb": "Slows zombies by 60% and deals 5 HP/s."
+      },
+      {
+        "id": "spikes",
+        "name": "Spike strip",
+        "cost": { "scrap": 3 },
+        "size": [3, 0.15, 0.8],
+        "hp": 40,
+        "blocks": false,
+        "blurb": "Pops tires of raider vehicles."
+      },
+      {
+        "id": "spotlight",
+        "name": "Spotlight",
+        "cost": { "tech": 6, "fu": 1 },
+        "size": [0.8, 2.4, 0.8],
+        "hp": 60,
+        "blocks": true,
+        "coneRange": 40,
+        "signature": 14,
+        "blurb": "Reveals a 40 m cone and lets turrets see. Adds light Signature."
+      },
+      {
+        "id": "turret",
+        "name": "Turret nest",
+        "cost": { "tech": 15, "scrap": 5 },
+        "size": [1.6, 1.4, 1.6],
+        "hp": 160,
+        "blocks": true,
+        "range": 42,
+        "dps": 38,
+        "blurb": "Auto-fires using ammo from the Scrap stock."
+      },
+      {
+        "id": "drum",
+        "name": "Oil-drum trap",
+        "cost": { "fu": 3 },
+        "size": [0.7, 1.0, 0.7],
+        "hp": 30,
+        "blocks": false,
+        "radius": 5.5,
+        "damage": 140,
+        "blurb": "Area damage; the drum makes a flame wall."
+      },
+      {
+        "id": "mine",
+        "name": "Mine",
+        "cost": { "tech": 4 },
+        "size": [0.6, 0.1, 0.6],
+        "hp": 10,
+        "blocks": false,
+        "radius": 4.5,
+        "damage": 180,
+        "blurb": "Area damage when something steps on it."
+      }
+    ]
+  },
+  "sectors": 8,
+  "watchDetect": 80,
+  "unwatchedDetect": 25,
+  "sites": {
+    "gasStation": {
+      "name": "Ruined Gas Station",
+      "exposure": 0.55,
+      "cover": 0.7,
+      "room": 0.45,
+      "blurb": "Pre-built walls, a canopy of cover and few build points."
+    },
+    "flats": {
+      "name": "Open Flats",
+      "exposure": 0.9,
+      "cover": 0.15,
+      "room": 1.0,
+      "blurb": "Plenty of room, nothing to hide behind. Dust and light carry for miles."
+    },
+    "canyonMouth": {
+      "name": "Canyon Mouth",
+      "exposure": 0.3,
+      "cover": 0.85,
+      "room": 0.6,
+      "blurb": "Rock walls on three sides. Choke points make it defensible."
+    },
+    "carPark": {
+      "name": "Parking Structure",
+      "exposure": 0.45,
+      "cover": 0.8,
+      "room": 0.6,
+      "blurb": "Concrete ramps and pillars. Loud in a city that listens."
+    },
+    "plaza": {
+      "name": "Sunken Plaza",
+      "exposure": 0.8,
+      "cover": 0.3,
+      "room": 0.9,
+      "blurb": "Wide open and echoing. Lots of room to park, lots of ways in."
+    }
+  },
+  "raids": {
+    "waves": ["Probe", "Main", "Climax"],
+    "waveSeconds": 55,
+    "hot": { "loyalty": 3, "signatureMult": 1.0 },
+    "cold": { "loyalty": 0, "signatureMult": 0.75 }
+  }
+}

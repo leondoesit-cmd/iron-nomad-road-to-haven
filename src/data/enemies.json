@@ -1,0 +1,30 @@
+{
+  "zombies": {
+    "walker": { "name": "Walker", "hp": 45, "armor": 0, "wander": 0.9, "chase": 3.1, "damage": 12, "radius": 0.38, "weight": 1, "scale": 1.0 },
+    "runner": { "name": "Runner", "hp": 35, "armor": 0, "wander": 1.2, "chase": 5.0, "damage": 12, "radius": 0.36, "weight": 1.4, "scale": 0.97 },
+    "screamer": { "name": "Screamer", "hp": 30, "armor": 0, "wander": 1.0, "chase": 4.2, "damage": 8, "radius": 0.34, "weight": 3, "scale": 0.95, "shriek": 3.0 },
+    "bloater": { "name": "Bloater", "hp": 140, "armor": 0, "wander": 0.7, "chase": 1.5, "damage": 10, "radius": 0.7, "weight": 3, "scale": 1.5, "sporeRadius": 5, "sporeDps": 14, "sporeTime": 6 },
+    "brute": { "name": "Brute", "hp": 420, "armor": 0.6, "wander": 1.0, "chase": 3.6, "damage": 35, "radius": 0.6, "weight": 6, "scale": 1.45, "vehicleDamage": 28 },
+    "stalker": { "name": "Stalker", "hp": 70, "armor": 0, "wander": 2.0, "chase": 6.2, "damage": 16, "radius": 0.34, "weight": 3, "scale": 0.92, "hesitateRadius": 40 }
+  },
+  "zombieRules": {
+    "senseRadiusPerPoint": 0.8,
+    "indoorFactor": 0.5,
+    "cascadeChasers": 5,
+    "cascadeRadius": 30,
+    "grabDps": 12,
+    "pinDps": 16,
+    "pinAt": 2,
+    "pinBreakRotations": 5,
+    "plowSpeedLoss": 0.03,
+    "tierSpeedLoss": [0.1, 0.07, 0.03, 0.03, 0.02],
+    "bleedOut": 20
+  },
+  "raiders": {
+    "buggy": { "name": "Dune buggy", "hp": 160, "armor": 0.15, "speed": 27, "mass": 520, "dps": 9, "range": 55, "weight": 3 },
+    "wagon": { "name": "Spiked battle-wagon", "hp": 650, "armor": 0.45, "speed": 17, "mass": 2600, "dps": 14, "range": 40, "ramDamage": 90, "weight": 9, "rearTireHp": 60 },
+    "gunman": { "name": "Raider gunman", "hp": 55, "armor": 0, "speed": 3.8, "dps": 9, "range": 38, "weight": 1.5 },
+    "sniper": { "name": "Raider sniper", "hp": 40, "armor": 0, "speed": 3.0, "dps": 22, "range": 90, "weight": 4 },
+    "saboteur": { "name": "Saboteur", "hp": 45, "armor": 0, "speed": 5.0, "dps": 0, "range": 2, "weight": 3 }
+  }
+}
