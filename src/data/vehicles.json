@@ -34,7 +34,10 @@
         "uprightGain": 260,
         "lean": true
       },
-      "upgrade": { "parts": 25, "scrap": 40, "tech": 0, "chassis": 0 }
+      "upgrade": { "parts": 25, "scrap": 40, "tech": 0, "chassis": 0 },
+      "offroad": 0.45,
+      "weaponMount": "none",
+      "slots": ["engine", "wheels", "armor", "utility", "rear"]
     },
     {
       "tier": 2,
@@ -69,7 +72,10 @@
         "uprightGain": 0,
         "lean": false
       },
-      "upgrade": { "parts": 60, "scrap": 80, "tech": 10, "chassis": 1 }
+      "upgrade": { "parts": 60, "scrap": 80, "tech": 10, "chassis": 1 },
+      "offroad": 0.45,
+      "weaponMount": "front",
+      "slots": ["engine", "wheels", "armor", "weapon", "utility", "front", "rear"]
     },
     {
       "tier": 3,
@@ -104,7 +110,10 @@
         "uprightGain": 0,
         "lean": false
       },
-      "upgrade": { "parts": 140, "scrap": 200, "tech": 40, "chassis": 0, "needsGarage": true }
+      "upgrade": { "parts": 140, "scrap": 200, "tech": 40, "chassis": 0, "needsGarage": true },
+      "offroad": 0.45,
+      "weaponMount": "bed",
+      "slots": ["engine", "wheels", "armor", "weapon", "utility", "front", "roof", "rear", "side"]
     },
     {
       "tier": 4,
@@ -140,7 +149,10 @@
         "uprightGain": 0,
         "lean": false
       },
-      "upgrade": { "parts": 300, "scrap": 400, "tech": 100, "chassis": 0, "needsGarage": true }
+      "upgrade": { "parts": 300, "scrap": 400, "tech": 100, "chassis": 0, "needsGarage": true },
+      "offroad": 0.5,
+      "weaponMount": "front",
+      "slots": ["engine", "wheels", "armor", "weapon", "utility", "front", "roof", "rear", "side"]
     },
     {
       "tier": 5,
@@ -176,35 +188,183 @@
         "uprightGain": 0,
         "lean": false
       },
-      "upgrade": { "parts": 0, "scrap": 0, "tech": 0, "chassis": 0 }
+      "upgrade": { "parts": 0, "scrap": 0, "tech": 0, "chassis": 0 },
+      "offroad": 0.5,
+      "weaponMount": "front",
+      "slots": ["engine", "wheels", "armor", "weapon", "utility", "front", "roof", "rear", "side"]
     }
   ],
-  "modules": {
-    "slots": ["engine", "armor", "wheels", "weapon", "utility"],
-    "levels": [
-      { "level": 1, "parts": 10, "scrap": 15, "tech": 0 },
-      { "level": 2, "parts": 20, "scrap": 30, "tech": 5 },
-      { "level": 3, "parts": 40, "scrap": 60, "tech": 15 }
-    ],
-    "perLevel": {
-      "engine": { "force": 0.08, "topSpeed": 0.04 },
-      "armor": { "armor": 0.05 },
-      "wheels": { "grip": 0.06, "travel": 0.1 },
-      "weapon": { "damage": 0.15 },
-      "utility": { "tank": 0.2, "cargo": 2 }
-    },
-    "labels": {
-      "engine": "Engine",
-      "armor": "Armor plating",
-      "wheels": "Wheels & suspension",
-      "weapon": "Weapon",
-      "utility": "Utility rack"
-    }
-  },
   "surfaces": {
     "asphalt": { "grip": 1.1, "drag": 0.0 },
     "hardpan": { "grip": 1.0, "drag": 0.0 },
     "sand": { "grip": 0.6, "drag": 0.35 },
     "mud": { "grip": 0.5, "drag": 0.2 }
-  }
+  },
+  "cars": [
+    {
+      "tier": 2,
+      "id": "hatch",
+      "name": "Compact Hatchback",
+      "width": 1.72,
+      "length": 3.75,
+      "topSpeedKmh": 118,
+      "hp": 120,
+      "armor": 0.0,
+      "cargo": 10,
+      "seats": 2,
+      "weapon": null,
+      "signature": { "idle": 28, "moving": 40 },
+      "tank": 8,
+      "burn": 0.8,
+      "camera": { "dist": 6.0, "height": 2.6 },
+      "physics": {
+        "mass": 1000,
+        "wheelCount": 4,
+        "maxSteerDeg": 32,
+        "suspension": { "stiffness": 26, "travel": 0.28, "rest": 0.32 },
+        "frictionSlip": 3.1,
+        "sideFriction": 1.0,
+        "engineForce": 8800,
+        "brake": 10,
+        "wheelRadius": 0.32,
+        "halfExtents": [0.8, 0.4, 1.78],
+        "hardY": -0.1,
+        "wheelsZ": [1.2, -1.15],
+        "wheelsX": [0.74, -0.74],
+        "uprightGain": 0,
+        "lean": false
+      },
+      "upgrade": { "parts": 0, "scrap": 0, "tech": 0, "chassis": 0 },
+      "found": true,
+      "lootWeight": 4,
+      "offroad": 0.2,
+      "weaponMount": "front",
+      "slots": ["engine", "wheels", "armor", "weapon", "utility", "front", "roof", "rear", "side"],
+      "seat": { "driver": [0.36, 0.02, -0.05], "passenger": [-0.36, 0.02, -0.05] }
+    },
+    {
+      "tier": 2,
+      "id": "sedan",
+      "name": "Family Sedan",
+      "width": 1.82,
+      "length": 4.4,
+      "topSpeedKmh": 122,
+      "hp": 170,
+      "armor": 0.05,
+      "cargo": 14,
+      "seats": 2,
+      "weapon": null,
+      "signature": { "idle": 32, "moving": 46 },
+      "tank": 11,
+      "burn": 1.0,
+      "camera": { "dist": 6.4, "height": 2.7 },
+      "physics": {
+        "mass": 1350,
+        "wheelCount": 4,
+        "maxSteerDeg": 30,
+        "suspension": { "stiffness": 26, "travel": 0.28, "rest": 0.32 },
+        "frictionSlip": 3.2,
+        "sideFriction": 1.0,
+        "engineForce": 11500,
+        "brake": 10,
+        "wheelRadius": 0.34,
+        "halfExtents": [0.85, 0.4, 2.05],
+        "hardY": -0.1,
+        "wheelsZ": [1.4, -1.35],
+        "wheelsX": [0.78, -0.78],
+        "uprightGain": 0,
+        "lean": false
+      },
+      "upgrade": { "parts": 0, "scrap": 0, "tech": 0, "chassis": 0 },
+      "found": true,
+      "lootWeight": 4,
+      "offroad": 0.15,
+      "weaponMount": "front",
+      "slots": ["engine", "wheels", "armor", "weapon", "utility", "front", "roof", "rear", "side"],
+      "seat": { "driver": [0.38, 0.02, 0.0], "passenger": [-0.38, 0.02, 0.0] }
+    },
+    {
+      "tier": 3,
+      "id": "pickup",
+      "name": "Work Pickup",
+      "width": 1.96,
+      "length": 5.0,
+      "topSpeedKmh": 108,
+      "hp": 260,
+      "armor": 0.12,
+      "cargo": 26,
+      "seats": 2,
+      "weapon": null,
+      "signature": { "idle": 42, "moving": 58 },
+      "tank": 16,
+      "burn": 1.5,
+      "camera": { "dist": 7.0, "height": 3.0 },
+      "physics": {
+        "mass": 1900,
+        "wheelCount": 4,
+        "maxSteerDeg": 28,
+        "suspension": { "stiffness": 28, "travel": 0.3, "rest": 0.34 },
+        "frictionSlip": 3.4,
+        "sideFriction": 1.0,
+        "engineForce": 15000,
+        "brake": 10,
+        "wheelRadius": 0.4,
+        "halfExtents": [0.93, 0.45, 2.35],
+        "hardY": -0.1,
+        "wheelsZ": [1.65, -1.55],
+        "wheelsX": [0.86, -0.86],
+        "uprightGain": 0,
+        "lean": false
+      },
+      "upgrade": { "parts": 0, "scrap": 0, "tech": 0, "chassis": 0 },
+      "found": true,
+      "lootWeight": 3,
+      "offroad": 0.4,
+      "weaponMount": "bed",
+      "slots": ["engine", "wheels", "armor", "weapon", "utility", "front", "roof", "rear", "side"],
+      "seat": { "driver": [0.4, 0.04, 0.25], "passenger": [-0.4, 0.04, 0.25] },
+      "gunner": [0, 0.35, -1.55]
+    },
+    {
+      "tier": 3,
+      "id": "van",
+      "name": "Delivery Van",
+      "width": 2.0,
+      "length": 5.3,
+      "topSpeedKmh": 98,
+      "hp": 220,
+      "armor": 0.08,
+      "cargo": 40,
+      "seats": 2,
+      "weapon": null,
+      "signature": { "idle": 44, "moving": 60 },
+      "tank": 20,
+      "burn": 1.7,
+      "camera": { "dist": 7.4, "height": 3.3 },
+      "physics": {
+        "mass": 2300,
+        "wheelCount": 4,
+        "maxSteerDeg": 26,
+        "suspension": { "stiffness": 28, "travel": 0.3, "rest": 0.34 },
+        "frictionSlip": 3.3,
+        "sideFriction": 1.0,
+        "engineForce": 16500,
+        "brake": 9,
+        "wheelRadius": 0.38,
+        "halfExtents": [0.95, 0.5, 2.5],
+        "hardY": -0.1,
+        "wheelsZ": [1.75, -1.6],
+        "wheelsX": [0.88, -0.88],
+        "uprightGain": 0,
+        "lean": false
+      },
+      "upgrade": { "parts": 0, "scrap": 0, "tech": 0, "chassis": 0 },
+      "found": true,
+      "lootWeight": 2,
+      "offroad": 0.2,
+      "weaponMount": "front",
+      "slots": ["engine", "wheels", "armor", "weapon", "utility", "front", "roof", "rear", "side"],
+      "seat": { "driver": [0.42, 0.05, 0.9], "passenger": [-0.42, 0.05, 0.9] }
+    }
+  ]
 }

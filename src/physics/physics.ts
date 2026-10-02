@@ -12,6 +12,8 @@ export const G = {
   PROP: 0x0008,
   SENSOR: 0x0010,
   BUILD: 0x0020,
+  /** Furniture: solid to people and vehicles, invisible to the camera. */
+  FURN: 0x0040,
 } as const;
 
 export const groups = (member: number, filter: number) => ((member & 0xffff) << 16) | (filter & 0xffff);
@@ -20,9 +22,10 @@ export const GROUPS = {
   /** Terrain, buildings, barricades. */
   static: groups(G.STATIC, G.VEHICLE | G.PLAYER | G.PROP),
   /** Chassis: collides with static, other vehicles, players and props. */
-  vehicle: groups(G.VEHICLE, G.STATIC | G.VEHICLE | G.PLAYER | G.PROP | G.BUILD),
+  vehicle: groups(G.VEHICLE, G.STATIC | G.VEHICLE | G.PLAYER | G.PROP | G.BUILD | G.FURN),
   /** Capsule: collides with static, vehicles and built structures. */
-  player: groups(G.PLAYER, G.STATIC | G.VEHICLE | G.BUILD),
+  player: groups(G.PLAYER, G.STATIC | G.VEHICLE | G.BUILD | G.FURN),
+  furn: groups(G.FURN, G.VEHICLE | G.PLAYER),
   prop: groups(G.PROP, G.STATIC | G.VEHICLE),
   /** Camp structures (blocking elements). */
   build: groups(G.BUILD, G.VEHICLE | G.PLAYER),
@@ -69,6 +72,16 @@ export class PhysicsWorld {
       .setCollisionGroups(collisionGroups)
       .setFriction(0.8);
     if (yaw) desc.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) });
+    return this.world.createCollider(desc);
+  }
+
+  /** Static box with an arbitrary orientation (a quaternion): ramps. */
+  addStaticTilted(cx: number, cy: number, cz: number, hx: number, hy: number, hz: number, q: [number, number, number, number], collisionGroups = GROUPS.static): Collider {
+    const desc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
+      .setTranslation(cx, cy, cz)
+      .setRotation({ x: q[0], y: q[1], z: q[2], w: q[3] })
+      .setCollisionGroups(collisionGroups)
+      .setFriction(0.8);
     return this.world.createCollider(desc);
   }
 

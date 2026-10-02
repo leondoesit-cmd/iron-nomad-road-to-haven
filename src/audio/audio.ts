@@ -8,11 +8,16 @@ export type SoundId =
   | 'crash'
   | 'hit'
   | 'thud'
+  | 'splash'
+  | 'drip'
   | 'swing'
   | 'reload'
   | 'horn'
   | 'wrench'
   | 'zdie'
+  | 'yelp'
+  | 'growl'
+  | 'caw'
   | 'scream'
   | 'beep'
   | 'bell'
@@ -167,7 +172,7 @@ export class AudioEngine {
     // Rate-limit identical sounds so machine guns don't flood the graph.
     const t0 = ctx.currentTime;
     const last = this.lastPlay.get(id) ?? 0;
-    const minGap = id === 'mg' ? 0.045 : id === 'pistol' ? 0.03 : id === 'hit' ? 0.06 : id === 'zdie' ? 0.05 : id === 'thud' ? 0.05 : 0;
+    const minGap = id === 'mg' ? 0.045 : id === 'pistol' ? 0.03 : id === 'hit' ? 0.06 : id === 'zdie' ? 0.05 : id === 'thud' ? 0.05 : id === 'yelp' || id === 'growl' || id === 'caw' ? 0.25 : 0;
     if (t0 - last < minGap) return;
     this.lastPlay.set(id, t0);
     let targets: { bus: number; gain: number }[];
@@ -254,6 +259,13 @@ export class AudioEngine {
       case 'swing':
         this.burst(out, t0, 'bandpass', 700, 0.7, 0.3, 0.05, 0.12);
         break;
+      case 'splash':
+        this.burst(out, t0, 'bandpass', 1500, 0.8, 0.32, 0.01, 0.4);
+        this.burst(out, t0, 'lowpass', 500, 0.6, 0.3, 0.005, 0.3);
+        break;
+      case 'drip':
+        this.tone(out, t0, 'sine', 1700, 650, 0.1, 0.002, 0.09);
+        break;
       case 'reload':
         this.tone(out, t0, 'square', 900, 700, 0.15, 0.002, 0.03);
         this.tone(out, t0 + 0.5, 'square', 1200, 800, 0.2, 0.002, 0.04);
@@ -266,6 +278,36 @@ export class AudioEngine {
         break;
       case 'wrench':
         for (let i = 0; i < 3; i++) this.tone(out, t0 + i * 0.07, 'square', 1500 - i * 200, 900, 0.1, 0.001, 0.025);
+        break;
+      case 'yelp':
+        this.tone(out, t0, 'sawtooth', 900 + Math.random() * 300, 380, 0.3, 0.01, 0.16);
+        this.tone(out, t0 + 0.12, 'triangle', 700, 300, 0.2, 0.01, 0.12);
+        break;
+      case 'growl': {
+        const o = ctx.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.setValueAtTime(70 + Math.random() * 20, t0);
+        o.frequency.linearRampToValueAtTime(55, t0 + 0.7);
+        const lfo = ctx.createOscillator();
+        lfo.frequency.value = 26;
+        const lg = ctx.createGain();
+        lg.gain.value = 18;
+        lfo.connect(lg).connect(o.frequency);
+        const f = ctx.createBiquadFilter();
+        f.type = 'lowpass';
+        f.frequency.value = 420;
+        const g = ctx.createGain();
+        this.env(g, t0, 0.45, 0.08, 0.6);
+        o.connect(f).connect(g).connect(out);
+        o.start(t0);
+        lfo.start(t0);
+        o.stop(t0 + 0.8);
+        lfo.stop(t0 + 0.8);
+        break;
+      }
+      case 'caw':
+        this.tone(out, t0, 'sawtooth', 520, 340, 0.22, 0.02, 0.14);
+        this.tone(out, t0 + 0.2, 'sawtooth', 480, 300, 0.2, 0.02, 0.16);
         break;
       case 'zdie': {
         const o = ctx.createOscillator();

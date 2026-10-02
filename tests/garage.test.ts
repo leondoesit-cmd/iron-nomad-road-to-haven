@@ -1,0 +1,393 @@
+import { describe, expect, it } from 'vitest';
+import { CHASSIS, PARTS, VEHICLES, chassisDef, partDef, validateData } from '../src/data';
+import { Rng } from '../src/core/rng';
+import {
+  effectiveStats,
+  newPart,
+  rollPart,
+  scrapValue,
+  terrainDrag,
+  terrainGrip,
+  weaponKind,
+  type PartItem,
+} from '../src/sim/parts';
+import {
+  currentCond,
+  dismantleYield,
+  fromHealth,
+  inventoryCap,
+  installPart,
+  needsService,
+  newBuild,
+  rebuildOnto,
+  removePart,
+  serviceBuild,
+  serviceCost,
+  toHealth,
+} from '../src/sim/garage';
+import { applyRepair, listFaults, planRepair } from '../src/sim/repair';
+import { SALVAGE_STAGES, salvageLoot } from '../src/sim/salvage';
+import { pickChassis, rollCar } from '../src/sim/cars';
+import { applyHit } from '../src/sim/damage';
+import { newStocks } from '../src/sim/resources';
+
+const part = (id: string, cond = 1): PartItem => newPart(id, cond);
+
+describe('catalogue', () => {
+  it('passes data validation', () => {
+    expect(validateData()).toEqual([]);
+  });
+  it('every chassis only lists slots that exist, and every part fits some chassis', () => {
+    for (const d of Object.values(CHASSIS)) for (const s of d.slots ?? PARTS.slots) expect(PARTS.slots).toContain(s);
+    for (const p of PARTS.parts) expect(Object.values(CHASSIS).some((d) => (d.slots ?? PARTS.slots).includes(p.slot))).toBe(true);
+  });
+  it('quality never lowers cost: a Mk3 costs more than a Mk1 in its slot', () => {
+    for (const slot of ['engine', 'wheels', 'armor', 'weapon', 'utility'] as const) {
+      const ps = PARTS.parts.filter((p) => p.slot === slot).sort((a, b) => a.mk - b.mk);
+      for (let i = 1; i < ps.length; i++) expect(ps[i].cost.scrap ?? 0).toBeGreaterThan(ps[i - 1].cost.scrap ?? 0);
+    }
+  });
+  it('has four found-car chassis and they are distinct from the tiers', () => {
+    expect(VEHICLES.cars.map((c) => c.id).sort()).toEqual(['hatch', 'pickup', 'sedan', 'van']);
+    expect(Object.keys(CHASSIS)).toHaveLength(VEHICLES.tiers.length + VEHICLES.cars.length);
+  });
+});
+
+describe('stats from parts', () => {
+  const sedan = chassisDef('sedan');
+  it('a bare chassis has the stock numbers', () => {
+    const s = effectiveStats(sedan, {});
+    expect(s.forceMult).toBe(1);
+    expect(s.armor).toBeCloseTo(sedan.armor);
+    expect(s.tank).toBe(sedan.tank);
+    expect(s.weapon).toBeNull();
+  });
+  it('parts add up', () => {
+    const s = effectiveStats(sedan, { engine: part('eng_v8'), armor: part('arm_weld'), front: part('fr_bull') });
+    expect(s.forceMult).toBeCloseTo(1.28);
+    expect(s.armor).toBeCloseTo(sedan.armor + 0.1);
+    expect(s.armorF).toBeCloseTo(0.08);
+    expect(s.burnMult).toBeGreaterThan(1.2);
+    expect(s.sigMult).toBeGreaterThan(1.1);
+  });
+  it('a weapon part grants a gun by the chassis mount, and boosts a native one', () => {
+    expect(weaponKind(chassisDef('sedan'), { weapon: part('wpn_lmg') })).toBe('frontLMG');
+    expect(weaponKind(chassisDef('pickup'), { weapon: part('wpn_lmg') })).toBe('bedMG');
+    expect(weaponKind(chassisDef('moped'), { weapon: part('wpn_lmg') })).toBeNull();
+    expect(weaponKind(chassisDef('quad'), {})).toBe('frontLMG');
+    expect(weaponKind(chassisDef('sedan'), {})).toBeNull();
+    expect(effectiveStats(chassisDef('quad'), { weapon: part('wpn_hmg') }).damageMult).toBeCloseTo(1.6);
+  });
+  it('off-road tyres shrink the sand penalty and a road car suffers more than a buggy', () => {
+    const sedanSand = terrainGrip(0.6, effectiveStats(sedan, {}).offroad);
+    const buggySand = terrainGrip(0.6, effectiveStats(chassisDef('buggy'), {}).offroad);
+    const sedanMud = terrainGrip(0.6, effectiveStats(sedan, { wheels: part('whl_bl') }).offroad);
+    expect(sedanSand).toBeLessThan(buggySand);
+    expect(sedanMud).toBeGreaterThan(sedanSand);
+    // The baseline chassis is unchanged by the model, so existing handling holds.
+    expect(buggySand).toBeCloseTo(0.6, 5);
+    expect(terrainDrag(0.35, 0.45)).toBeCloseTo(0.35, 5);
+    expect(terrainGrip(1.1, 0.1)).toBeCloseTo(1.1, 5);
+  });
+});
+
+describe('fitting parts', () => {
+  it('installing sets the component to the part condition and returns the old part worn', () => {
+    const b = newBuild('sedan', { seed: 1 });
+    expect(installPart(b, part('eng_i4', 0.7)).ok).toBe(true);
+    expect(b.comp.engine).toBeCloseTo(0.7);
+    b.comp.engine = 0.3; // driven hard
+    const res = installPart(b, part('eng_v6', 0.9));
+    expect(res.removed?.id).toBe('eng_i4');
+    expect(res.removed?.cond).toBeCloseTo(0.3);
+    expect(b.comp.engine).toBeCloseTo(0.9);
+  });
+  it('a dead tyre set leaves every wheel flat; a good set fixes them all', () => {
+    const b = newBuild('sedan', { seed: 1 });
+    installPart(b, part('whl_mt', 0));
+    expect(b.comp.tires.every((t) => t === 0)).toBe(true);
+    installPart(b, part('whl_mt', 0.8));
+    expect(b.comp.tires.every((t) => Math.abs(t - 0.8) < 1e-9)).toBe(true);
+  });
+  it('refuses a slot the chassis does not have', () => {
+    const moped = newBuild('moped', { seed: 1 });
+    const r = installPart(moped, part('fr_bull'));
+    expect(r.ok).toBe(false);
+    expect(moped.fit.front).toBeUndefined();
+  });
+  it('pulling a part leaves worn stock: removing a dead part cannot heal the vehicle', () => {
+    const b = newBuild('sedan', { seed: 1 });
+    installPart(b, part('eng_v6', 1));
+    b.comp.engine = 0;
+    const out = removePart(b, 'engine')!;
+    expect(out.cond).toBe(0);
+    expect(b.comp.engine).toBe(0);
+    installPart(b, part('eng_v6', 1));
+    const out2 = removePart(b, 'engine')!;
+    expect(out2.cond).toBe(1);
+    expect(b.comp.engine).toBeCloseTo(PARTS.stockCondition);
+  });
+  it('rebuilding onto a smaller chassis spills the parts that no longer fit', () => {
+    const b = newBuild('buggy', { seed: 1 });
+    installPart(b, part('fr_bull'));
+    installPart(b, part('eng_i4'));
+    const spill = rebuildOnto(b, 'moped');
+    expect(spill.map((p) => p.id)).toEqual(['fr_bull']);
+    expect(b.fit.engine?.id).toBe('eng_i4');
+    expect(b.chassis).toBe('moped');
+    expect(b.comp.tires).toHaveLength(2);
+  });
+  it('cargo space feeds the shared inventory', () => {
+    const a = newBuild('van', { seed: 1 });
+    const c = newBuild('moped', { seed: 2 });
+    expect(inventoryCap([a, c])).toBeGreaterThan(inventoryCap([c]));
+    installPart(a, part('rr_box'));
+    expect(inventoryCap([a])).toBeGreaterThan(16 + chassisDef('van').cargo);
+  });
+});
+
+describe('health bridge', () => {
+  it('round-trips condition through the live health object', () => {
+    const b = newBuild('pickup', { seed: 3 });
+    installPart(b, part('arm_weld', 0.8));
+    installPart(b, part('sd_plate'));
+    b.hp = 0.6;
+    b.comp.tires[2] = 0;
+    b.comp.leaking = true;
+    const h = toHealth(b);
+    expect(h.maxHp).toBeCloseTo(chassisDef('pickup').hp * 1.05);
+    expect(h.hp / h.maxHp).toBeCloseTo(0.6);
+    expect(h.comp.plates).toBeCloseTo(0.8);
+    expect(h.leaking).toBe(true);
+    expect(h.armorBonus?.side).toBeCloseTo(0.12);
+    h.hp = h.maxHp * 0.3;
+    h.comp.engine = 0.2;
+    const back = newBuild('pickup', { seed: 3 });
+    fromHealth(back, h, 0.4);
+    expect(back.hp).toBeCloseTo(0.3);
+    expect(back.comp.engine).toBeCloseTo(0.2);
+    expect(back.comp.tires[2]).toBe(0);
+    expect(back.fuel).toBeCloseTo(0.4);
+  });
+  it('side armour parts only protect against hits from that side', () => {
+    const b = newBuild('sedan', { seed: 1 });
+    const bare = toHealth(b);
+    installPart(b, part('sd_plate'));
+    const plated = toHealth(b);
+    const roll = () => 0.99;
+    const side = applyHit(plated, 40, { facing: 'side', roll }).dealt;
+    const sideBare = applyHit(bare, 40, { facing: 'side', roll }).dealt;
+    const frontPlated = applyHit(toHealth(b), 40, { facing: 'front', roll }).dealt;
+    const frontBare = applyHit(toHealth(newBuild('sedan', { seed: 1 })), 40, { facing: 'front', roll }).dealt;
+    expect(side).toBeLessThan(sideBare);
+    expect(frontPlated).toBeCloseTo(frontBare);
+  });
+});
+
+describe('field repair', () => {
+  const rich = newStocks({ scrap: 50, parts: 50 });
+  it('goes fire, leak, tyre, engine, mount, hull in that order', () => {
+    const b = newBuild('sedan', { seed: 1 });
+    const h = toHealth(b);
+    h.hp = h.maxHp * 0.4;
+    h.comp.engine = 0.2;
+    h.comp.tires[1] = 0;
+    h.leaking = true;
+    h.burning = true;
+    const order: string[] = [];
+    for (let i = 0; i < 20; i++) {
+      const job = planRepair(h, rich, { weapon: true });
+      if (!job) break;
+      order.push(job.kind);
+      applyRepair(h, job);
+    }
+    expect(order.slice(0, 5)).toEqual(['fire', 'leak', 'tire', 'engine', 'engine']);
+    expect(order[order.length - 1]).toBe('body');
+    expect(planRepair(h, rich)).toBeNull();
+    expect(h.hp).toBeCloseTo(h.maxHp, 0);
+  });
+  it('costs real stock and says what is missing', () => {
+    const h = toHealth(newBuild('sedan', { seed: 1 }));
+    h.comp.engine = 0.1;
+    const nothing = planRepair(h, newStocks())!;
+    expect(nothing.kind).toBe('engine');
+    expect(nothing.ok).toBe(false);
+    expect(nothing.why).toMatch(/Parts/);
+    expect(planRepair(h, newStocks({ parts: 3 }))!.ok).toBe(true);
+  });
+  it('falls back to improvised scrap work so nobody is stranded without parts', () => {
+    const h = toHealth(newBuild('sedan', { seed: 1 }));
+    h.comp.engine = 0.1;
+    const good = planRepair(h, newStocks({ scrap: 20, parts: 3 }))!;
+    const improvised = planRepair(h, newStocks({ scrap: 20 }))!;
+    expect(good.cost).toEqual({ parts: 3 });
+    expect(improvised.ok).toBe(true);
+    expect(improvised.cost).toEqual({ scrap: 9 });
+    expect(improvised.label).toMatch(/improvised/);
+    expect(improvised.secs).toBeGreaterThan(good.secs);
+  });
+  it('a spare wheel makes tyre swaps free and quicker', () => {
+    const h = toHealth(newBuild('sedan', { seed: 1 }));
+    h.comp.tires[0] = 0;
+    const plain = planRepair(h, rich)!;
+    const spare = planRepair(h, rich, { spare: true })!;
+    expect(plain.cost.scrap).toBe(2);
+    expect(spare.cost.scrap ?? 0).toBe(0);
+    expect(spare.secs).toBeLessThan(plain.secs);
+  });
+  it('a destroyed vehicle cannot be repaired', () => {
+    const h = toHealth(newBuild('sedan', { seed: 1 }));
+    h.destroyed = true;
+    expect(planRepair(h, rich)).toBeNull();
+  });
+  it('lists faults in plain words', () => {
+    const h = toHealth(newBuild('sedan', { seed: 1 }));
+    expect(listFaults(h)).toEqual([]);
+    h.comp.tires[0] = 0;
+    h.comp.tires[1] = 0;
+    h.comp.engine = 0;
+    expect(listFaults(h)).toEqual(['2 flat tyres', 'engine dead']);
+  });
+});
+
+describe('servicing and dismantling', () => {
+  it('a damaged build has a price, a full service clears it', () => {
+    const b = newBuild('sedan', { seed: 1 });
+    expect(needsService(b)).toBe(false);
+    expect(serviceCost(b)).toEqual({});
+    b.hp = 0.5;
+    b.comp.engine = 0.2;
+    b.comp.tires[0] = 0;
+    expect(needsService(b)).toBe(true);
+    const c = serviceCost(b);
+    expect(c.scrap).toBeGreaterThan(0);
+    expect(c.parts).toBeGreaterThan(0);
+    serviceBuild(b);
+    expect(needsService(b)).toBe(false);
+  });
+  it('dismantling returns fitted parts with their wear plus raw materials', () => {
+    const b = newBuild('sedan', { seed: 1 });
+    installPart(b, part('eng_v6', 1));
+    b.comp.engine = 0.5;
+    const y = dismantleYield(b);
+    expect(y.items).toHaveLength(1);
+    expect(y.items[0].cond).toBeCloseTo(0.5);
+    expect((y.stocks.scrap ?? 0) + (y.stocks.parts ?? 0)).toBeGreaterThan(5);
+  });
+  it('currentCond reads the live component for worn slots and 1 for the rest', () => {
+    const b = newBuild('sedan', { seed: 1 });
+    b.comp.plates = 0.4;
+    expect(currentCond(b, 'armor')).toBeCloseTo(0.4);
+    expect(currentCond(b, 'front')).toBe(1);
+  });
+});
+
+describe('salvage', () => {
+  const ctx = { seed: 777, kind: 'car' as const, chassis: 'sedan', burnt: false };
+  it('is fixed by the seed so a reloaded car cannot be rerolled', () => {
+    for (let i = 0; i < SALVAGE_STAGES.length; i++) {
+      const a = salvageLoot(i, ctx);
+      const b = salvageLoot(i, ctx);
+      expect(a.items.map((p) => p.id)).toEqual(b.items.map((p) => p.id));
+      expect(a.stocks).toEqual(b.stocks);
+      expect(a.ammo).toBe(b.ammo);
+    }
+  });
+  it('each stage pulls the right kind of part', () => {
+    for (let s = 1; s < 60; s++) {
+      const c = { ...ctx, seed: s * 31 };
+      expect(partDef(salvageLoot(0, c).items[0].id).slot).toBe('wheels');
+      expect(partDef(salvageLoot(1, c).items[0].id).slot).toBe('engine');
+    }
+  });
+  it('burnt hulks give worn parts and often nothing in the trunk', () => {
+    let worn = 0;
+    let empty = 0;
+    for (let s = 1; s < 100; s++) {
+      const c = { ...ctx, seed: s * 17, burnt: true };
+      if (salvageLoot(1, c).items[0].cond < 0.6) worn++;
+      const t = salvageLoot(3, c);
+      if (!Object.keys(t.stocks).length && !t.ammo && !t.items.length) empty++;
+    }
+    expect(worn).toBe(99);
+    expect(empty).toBeGreaterThan(40);
+    expect(empty).toBeLessThan(75);
+  });
+  it('raiders carry better kit than family cars', () => {
+    const avg = (kind: 'car' | 'raider') => {
+      let t = 0;
+      for (let s = 1; s <= 300; s++) t += salvageLoot(1, { ...ctx, kind, seed: s * 13 }).items.reduce((a, p) => a + partDef(p.id).mk, 0);
+      return t / 300;
+    };
+    expect(avg('raider')).toBeGreaterThan(avg('car') + 0.3);
+  });
+  it('a lost convoy vehicle gives back its own parts, battered', () => {
+    const b = newBuild('sedan', { seed: 1 });
+    installPart(b, part('eng_v8', 1));
+    installPart(b, part('fr_blade', 1));
+    const c = { ...ctx, kind: 'convoy' as const, fit: b.fit };
+    expect(salvageLoot(1, c).items[0].id).toBe('eng_v8');
+    expect(salvageLoot(1, c).items[0].cond).toBeLessThanOrEqual(0.45);
+    expect(salvageLoot(2, c).items.map((p) => p.id)).toContain('fr_blade');
+  });
+  it('Mk3 salvage stays rare for ordinary cars', () => {
+    let mk3 = 0;
+    const n = 600;
+    for (let s = 1; s <= n; s++) for (let st = 0; st < 3; st++) for (const it of salvageLoot(st, { ...ctx, seed: s * 7919 }).items) if (partDef(it.id).mk === 3) mk3++;
+    expect(mk3 / (n * 3)).toBeLessThan(0.1);
+  });
+});
+
+describe('world cars', () => {
+  it('rolls deterministically from the seed', () => {
+    const a = rollCar(4242, { biome: 'wasteland' });
+    const b = rollCar(4242, { biome: 'wasteland' });
+    expect(a.status).toBe(b.status);
+    expect(a.build.chassis).toBe(b.build.chassis);
+    expect(a.build.paint).toBe(b.build.paint);
+    expect(a.build.comp).toEqual(b.build.comp);
+  });
+  it('mixes hulks, rough runners and sound cars', () => {
+    const count = { hulk: 0, rough: 0, intact: 0 };
+    for (let s = 1; s <= 1000; s++) count[rollCar(s * 97, { biome: 'wasteland' }).status]++;
+    expect(count.hulk).toBeGreaterThan(250);
+    expect(count.rough).toBeGreaterThan(380);
+    expect(count.intact).toBeGreaterThan(130);
+    expect(count.intact).toBeLessThan(count.rough);
+  });
+  it('a rough car always has at least two real faults, and a hulk cannot be driven', () => {
+    for (let s = 1; s <= 400; s++) {
+      const r = rollCar(s * 31, { biome: 'city' });
+      const b = r.build;
+      if (r.status === 'rough') {
+        const faults = (b.comp.engine < 0.6 ? 1 : 0) + (b.comp.tires.some((t) => t === 0) ? 1 : 0) + (b.comp.leaking ? 1 : 0);
+        expect(faults).toBeGreaterThanOrEqual(2);
+      }
+      if (r.status === 'hulk') {
+        expect(b.hp).toBeLessThan(0.1);
+        expect(b.fuel).toBe(0);
+        expect(b.comp.engine).toBe(0);
+      }
+      expect(b.comp.tires).toHaveLength(4);
+    }
+  });
+  it('every found chassis turns up, hatchbacks more than vans', () => {
+    const rng = new Rng(5);
+    const n: Record<string, number> = {};
+    for (let i = 0; i < 3000; i++) {
+      const c = pickChassis(rng);
+      n[c] = (n[c] ?? 0) + 1;
+    }
+    expect(Object.keys(n).sort()).toEqual(['hatch', 'pickup', 'sedan', 'van']);
+    expect(n.hatch).toBeGreaterThan(n.van);
+  });
+  it('rolled parts come from the requested slot and are worth something', () => {
+    const rng = new Rng(9);
+    for (let i = 0; i < 80; i++) {
+      const it = rollPart(rng, { slots: ['armor'], minMk: 2 });
+      expect(partDef(it.id).slot).toBe('armor');
+      expect(partDef(it.id).mk).toBeGreaterThanOrEqual(2);
+      expect(scrapValue(it)).toBeGreaterThan(0);
+    }
+  });
+});

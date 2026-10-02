@@ -1,21 +1,21 @@
 import { t } from '../data';
 import { LABEL, whole } from '../sim/resources';
 import { loyaltyBand } from '../sim/loyalty';
+import { SALVAGE_STAGES } from '../sim/salvage';
+import { OIL_CRITICAL, OIL_LOW } from '../sim/oil';
+import { carriedName } from '../sim/carry';
 import { formatClock, wrapAngle, clamp } from '../core/math';
 import { PLAYER_CSS } from '../render/palette';
 import type { Scene, CompassPin } from '../game/scene';
 import type { LegScene } from '../game/legScene';
 import type { CampScene } from '../game/campScene';
 import type { Player } from '../game/player';
-import type { Slot } from '../input/input';
+import type { Vehicle } from '../game/vehicle';
+import { promptLabel, type Slot } from '../input/input';
 
-const KEY_LABEL: Record<1 | 2, Record<string, string>> = {
-  1: { A: 'G', Y: 'R', X: 'T', RT: 'F', RB: 'F', B: 'C', LB: 'V' },
-  2: { A: '/', Y: 'Enter', X: ',', RT: 'R-Shift', RB: 'R-Shift', B: '.', LB: 'N' },
-};
+/** The key or button a prompt names, as this seat has it bound. */
 export function btnLabel(slot: Slot | null, btn: string): string {
-  if (slot?.kind === 'kb') return KEY_LABEL[slot.set][btn] ?? btn;
-  return btn;
+  return promptLabel(slot, btn);
 }
 
 const PIN_COLOR: Record<CompassPin['kind'], string> = {
@@ -31,6 +31,14 @@ const PIN_COLOR: Record<CompassPin['kind'], string> = {
   watch: '#7ddc7a',
   sector: '#ffb454',
   hub: '#ffe08a',
+  dock: '#5ad8ff',
+  delve: '#c89aff',
+  chest: '#ffd24a',
+  key: '#7dffb0',
+  lock: '#ff7a5a',
+  exit: '#ffe08a',
+  part: '#ffb454',
+  ride: '#7ddc7a',
 };
 
 class PlayerHud {
@@ -64,6 +72,7 @@ class PlayerHud {
         <div class="tag" data-k="vname">ON FOOT</div>
         <div class="bar" data-k="hpbar"><div class="fill" data-k="hpfill"></div></div>
         <div class="row" data-k="fuelrow"><div class="bar fuel" data-k="fuelbar"><div class="fill" data-k="fuelfill"></div></div><span class="val" data-k="fuelval"></span></div>
+        <div class="row" data-k="oilrow"><div class="bar oil" data-k="oilbar"><div class="fill" data-k="oilfill"></div></div><span class="val" data-k="oilval">OIL</span></div>
         <div class="row"><div class="speed" data-k="speed">0<small>km/h</small></div><div class="comp" data-k="comp"></div></div>
       </div>
       <div class="corner br">
@@ -73,8 +82,10 @@ class PlayerHud {
         <div class="tag" data-k="stocks"></div>
       </div>
       <div class="bc">
+        <div class="vread" data-k="vread"></div>
         <div class="notes" data-k="notes"></div>
         <div class="prompt" data-k="prompt"><span class="btn" data-k="pbtn">A</span><span data-k="ptext"></span><div class="hold" data-k="phold"></div></div>
+        <div class="prompt alt" data-k="prompt2"><span class="btn x" data-k="pbtn2">X</span><span data-k="ptext2"></span></div>
       </div>
       <div class="reticle" data-k="reticle"></div>
       <div class="msgs"><div class="sub" data-k="sub"></div><div class="tipbox" data-k="tip"></div></div>
@@ -254,11 +265,24 @@ export class Hud {
     this.huds = halves.map((h, i) => new PlayerHud(h, i));
   }
 
+  private layoutName: 'horizontal' | 'vertical' = 'vertical';
+  private seats: 1 | 2 = 2;
+
   setLayout(l: 'horizontal' | 'vertical') {
+    this.layoutName = l;
     const cls = l === 'horizontal' ? ['h-top', 'h-bottom'] : ['v-left', 'v-right'];
-    this.halves.forEach((h, i) => (h.className = `half ${cls[i]}`));
+    // Solo: the first half fills the screen and the second one and the divider go away.
+    this.halves.forEach((h, i) => (h.className = this.seats === 1 ? `half ${i === 0 ? 'full' : 'off'}` : `half ${cls[i]}`));
     const div = document.getElementById('divider');
-    if (div) div.className = l === 'horizontal' ? 'h' : 'v';
+    if (div) {
+      div.className = l === 'horizontal' ? 'h' : 'v';
+      div.style.display = this.seats === 1 ? 'none' : '';
+    }
+  }
+
+  setSeats(n: 1 | 2) {
+    this.seats = n;
+    this.setLayout(this.layoutName);
   }
 
   setScale(s: number) {
@@ -314,7 +338,7 @@ export class Hud {
     h.setStyle('sigfill', 'width', `${clamp(sig, 0, 100)}%`);
     h.setClass('sigbar', sig >= 60 ? 'high' : sig >= 30 ? 'mid' : '');
     h.setText('sigval', String(Math.round(sig)));
-    h.setText('siglabel', scene.biome === 'city' ? 'NOISE · HEARD IN CITIES' : 'DUST · SEEN ON THE ROAD');
+    h.setText('siglabel', scene.mode === 'delve' ? 'NOISE · THE DEAD LISTEN' : scene.biome === 'city' ? 'NOISE · HEARD IN CITIES' : 'DUST · SEEN ON THE ROAD');
     const chips: string[] = [];
     if (leg && leg.gap > 150) chips.push(`<span class="chip ${leg.gap > 250 ? 'bad' : 'warn'}">PARTNER ${Math.round(leg.gap)}m</span>`);
     if (scene.night > 0.4) chips.push('<span class="chip warn">NIGHT: 2x SIGNATURE WITH LIGHTS</span>');
@@ -356,6 +380,12 @@ export class Hud {
       h.setStyle('build', 'display', html ? 'flex' : 'none');
       h.setHtml('build', html);
     } else h.setStyle('build', 'display', 'none');
+    // Delve: chests found and what to do next, in the clock and tag slots.
+    if (scene.mode === 'delve') {
+      const line = (scene as unknown as { hudLine(): { clock: string; tag: string } }).hudLine();
+      h.setText('clock', line.clock);
+      h.setText('daytag', line.tag);
+    }
 
     // Vehicle / player status
     const cur = v ?? p.ownVehicle;
@@ -369,13 +399,14 @@ export class Hud {
       h.setStyle('fuelfill', 'width', `${clamp(ff, 0, 1) * 100}%`);
       h.setClass('fuelbar', ff < 0.15 ? 'fuel crit' : 'fuel');
       h.setText('fuelval', `${v.fuel.toFixed(1)}`);
+      this.oilGauge(h, v);
       h.setText('speed', `${Math.round(Math.abs(v.speed) * 3.6)}`);
       h.el('speed').innerHTML = `${Math.round(Math.abs(v.speed) * 3.6)}<small>km/h</small>`;
       const c = v.health.comp;
       const cls = (x: number) => (x <= 0.001 ? 'bad' : x < 0.99 ? 'mid' : '');
       h.setHtml(
         'comp',
-        `<i class="${cls(c.engine)}" title="engine">E</i><i class="${c.tires.some((x) => x <= 0) ? 'bad' : ''}">T</i><i class="${v.health.leaking ? 'bad' : ''}">F</i><i class="${cls(c.mount)}">W</i>${v.health.burning ? '<i class="bad">🔥</i>' : ''}`,
+        `<i class="${cls(c.engine)}" title="engine">E</i><i class="${c.tires.some((x) => x <= 0) ? 'bad' : ''}">T</i><i class="${v.health.leaking ? 'bad' : ''}">F</i><i class="${cls(c.mount)}">W</i><i class="${c.oil < OIL_CRITICAL ? 'bad' : c.oil < OIL_LOW ? 'mid' : ''}" title="oil">O</i>${v.health.burning ? '<i class="bad">🔥</i>' : ''}`,
       );
     } else if (p.state === 'foot' || p.state === 'entering' || p.state === 'downed' || p.state === 'dead') {
       h.setText('vname', p.state === 'dead' ? 'DOWN FOR GOOD' : 'ON FOOT');
@@ -387,9 +418,10 @@ export class Hud {
         h.setStyle('fuelfill', 'width', `${clamp(ff, 0, 1) * 100}%`);
         h.setText('fuelval', cur.fuel.toFixed(1));
       }
+      this.oilGauge(h, cur && !cur.wreck ? cur : null);
       h.el('speed').innerHTML = `${Math.round(p.moveSpeed * 3.6)}<small>km/h</small>`;
       h.setHtml('comp', '');
-    }
+    } else this.oilGauge(h, null);
 
     // Weapon block
     const pad = slot?.kind === 'pad';
@@ -410,22 +442,30 @@ export class Hud {
       h.setText('wname', 'BED MG');
       h.el('ammo').innerHTML = `${camp.ammo}<small> rds</small>`;
       h.setHtml('equip', '');
+    } else if (p.carry) {
+      h.setText('wname', 'CARRYING');
+      h.el('ammo').innerHTML = `<small>${escapeHtml(carriedName(p.carry))}</small>`;
+      h.setHtml('equip', `<span class="on">HANDS FULL</span>`);
     } else {
       const eq = p.equip;
-      h.setText('wname', p.reloadT > 0 ? 'RELOADING' : eq === 'pistol' ? 'PISTOL' : eq === 'wrench' ? 'WRENCH' : eq === 'jerrycan' ? 'JERRYCAN' : p.utility.toUpperCase());
+      h.setText('wname', p.reloadT > 0 ? 'RELOADING' : eq === 'pistol' ? 'PISTOL' : eq === 'wrench' ? 'WRENCH' : eq === 'crowbar' ? 'CROWBAR' : eq === 'jerrycan' ? 'JERRYCAN' : p.utility.toUpperCase());
       if (eq === 'pistol') h.el('ammo').innerHTML = `${p.mag}<small>/${camp.ammo}</small>`;
-      else if (eq === 'wrench') h.el('ammo').innerHTML = `<small>${whole(camp.stocks.scrap)} SCRAP</small>`;
-      else if (eq === 'jerrycan') h.el('ammo').innerHTML = `<small>${camp.stocks.fuel.toFixed(1)} FU</small>`;
+      else if (eq === 'wrench') h.el('ammo').innerHTML = `<small>${whole(camp.stocks.scrap)} SCRAP · ${whole(camp.stocks.parts)} PARTS</small>`;
+      else if (eq === 'crowbar') h.el('ammo').innerHTML = `<small>${camp.inventory.length}/${camp.inventoryCap} PARTS</small>`;
+      else if (eq === 'jerrycan') h.el('ammo').innerHTML = `<small>${camp.stocks.fuel.toFixed(1)} FU · ${Math.round(camp.items.oil * 100)}% OIL</small>`;
       else h.el('ammo').innerHTML = `<small>${p.utility === 'horn' ? '∞' : camp.items[p.utility as 'flare']}</small>`;
       h.setHtml(
         'equip',
-        `<span class="${eq === 'pistol' ? 'on' : ''}">GUN</span><span class="${eq === 'wrench' ? 'on' : ''}">WRENCH</span><span class="${eq === 'jerrycan' ? 'on' : ''}">CAN</span><span class="${eq === 'utility' ? 'on' : ''}">${p.utility.toUpperCase()}</span>`,
+        `<span class="${eq === 'pistol' ? 'on' : ''}">GUN</span><span class="${eq === 'wrench' ? 'on' : ''}">WRENCH</span><span class="${eq === 'crowbar' ? 'on' : ''}">PRY</span><span class="${eq === 'jerrycan' ? 'on' : ''}">CAN</span><span class="${eq === 'utility' ? 'on' : ''}">${p.utility.toUpperCase()}</span>`,
       );
     }
     h.setText(
       'stocks',
-      `FUEL ${camp.stocks.fuel.toFixed(0)} · RATIONS ${whole(camp.stocks.rations)} · SCRAP ${whole(camp.stocks.scrap)} · PARTS ${whole(camp.stocks.parts)}`,
+      `FUEL ${camp.stocks.fuel.toFixed(0)} · OIL ${Math.round(camp.items.oil * 100)}% · RATIONS ${whole(camp.stocks.rations)} · SCRAP ${whole(camp.stocks.scrap)} · PARTS ${whole(camp.stocks.parts)}`,
     );
+
+    // The vehicle you are standing next to: what it is and what is wrong with it.
+    h.setHtml('vread', this.vehicleReadout(p, scene));
 
     // Notes
     h.setHtml('notes', p.notes.slice(-3).map((n) => `<div class="note ${n.kind}">${escapeHtml(n.text)}</div>`).join(''));
@@ -439,9 +479,16 @@ export class Hud {
       h.setClass('pbtn', pr.button === 'Y' ? 'y' : pr.button === 'X' ? 'x' : '');
       h.setStyle('phold', 'width', pr.progress >= 0 ? `${clamp(pr.progress, 0, 1) * 100}%` : '0%');
     } else h.setStyle('prompt', 'display', 'none');
+    const alt = p.promptAlt;
+    h.setStyle('prompt2', 'display', pr && alt ? 'flex' : 'none');
+    if (pr && alt) {
+      h.setText('ptext2', alt.text);
+      h.setText('pbtn2', btnLabel(slot, alt.button));
+      h.setClass('prompt2', alt.ok ? 'alt' : 'alt off');
+    }
 
     // Reticle: on foot aiming or manning the bed gun.
-    const showRet = (p.state === 'foot' && p.equip === 'pistol') || p.state === 'gunner';
+    const showRet = (p.state === 'foot' && p.equip === 'pistol' && !p.carry) || p.state === 'gunner';
     h.setStyle('reticle', 'display', showRet ? 'block' : 'none');
     h.setStyle('reticle', 'transform', `scale(${1 + (1 - p.ads) * 0.4})`);
 
@@ -476,6 +523,45 @@ export class Hud {
     h.setClass('disc', this.disconnected[p.index] ? 'on' : '');
     this.updateWheel(h, p, slot);
     this.updateSheet(h, p, scene, leg);
+  }
+
+  /** The oil bar under the fuel bar: shown for a convoy vehicle with an engine that burns it. */
+  private oilGauge(h: PlayerHud, v: Vehicle | null) {
+    const show = !!v && !v.wreck && v.faction === 'convoy' && v.def.physics.kind !== 'boat';
+    h.setStyle('oilrow', 'display', show ? 'flex' : 'none');
+    if (!show || !v) return;
+    const o = v.health.comp.oil;
+    h.setStyle('oilfill', 'width', `${clamp(o, 0, 1) * 100}%`);
+    h.setClass('oilbar', o < OIL_CRITICAL ? 'oil crit' : o < OIL_LOW ? 'oil low' : 'oil');
+    h.setText('oilval', `OIL ${Math.round(o * 100)}`);
+  }
+
+  /** A card for the nearest vehicle when on foot: name, owner, and condition chips so it is clear what needs doing. */
+  private vehicleReadout(p: Player, scene: Scene): string {
+    if (p.state !== 'foot' || p.buildMode || p.action) return '';
+    const v = p.nearestVehicle(6.5, (q) => q.kind !== 'crew' && (q.faction !== 'raider' || q.wreck));
+    if (!v) return '';
+    const c = v.health.comp;
+    const tag = scene.cars.describe(v);
+    const chip = (txt: string, cls = '') => `<span class="chip ${cls}">${txt}</span>`;
+    const parts: string[] = [];
+    if (v.wreck) {
+      const left = SALVAGE_STAGES.length - v.salvaged;
+      parts.push(chip(left > 0 ? `${left} STAGE${left > 1 ? 'S' : ''} TO STRIP` : 'NOTHING LEFT', left > 0 ? 'good' : ''));
+    } else {
+      parts.push(c.engine < 0.1 ? chip('ENGINE DEAD', 'bad') : c.engine < 0.999 ? chip(`ENGINE ${Math.round(c.engine * 100)}%`, c.engine < 0.5 ? 'warn' : '') : chip('ENGINE OK'));
+      const flats = c.tires.filter((x) => x <= 0.001).length;
+      parts.push(flats ? chip(`${flats} FLAT`, 'bad') : chip('TYRES OK'));
+      parts.push(chip(`FUEL ${Math.round((v.fuel / Math.max(0.01, v.tankMax)) * 100)}%`, v.fuel < 0.5 ? 'bad' : v.fuel / v.tankMax < 0.25 ? 'warn' : ''));
+      if (c.oil < OIL_LOW) parts.push(chip(c.oil < OIL_CRITICAL ? 'OIL DRY' : 'OIL LOW', c.oil < OIL_CRITICAL ? 'bad' : 'warn'));
+      else parts.push(chip(`OIL ${Math.round(c.oil * 100)}%`));
+      parts.push(chip(`BODY ${Math.round(v.hpFrac * 100)}%`, v.hpFrac < 0.35 ? 'bad' : v.hpFrac < 0.65 ? 'warn' : ''));
+      if (v.health.leaking) parts.push(chip('LEAKING', 'bad'));
+      if (v.health.burning) parts.push(chip('ON FIRE', 'bad'));
+    }
+    const fitted = v.build ? Object.keys(v.build.fit).length : 0;
+    if (fitted) parts.push(chip(`${fitted} PART${fitted > 1 ? 'S' : ''} FITTED`));
+    return `<div class="vcard"><b>${escapeHtml(v.def.name.toUpperCase())}</b> <em>${tag}</em></div><div class="chips">${parts.join('')}</div>`;
   }
 
   private updateWheel(h: PlayerHud, p: Player, slot: Slot | null) {

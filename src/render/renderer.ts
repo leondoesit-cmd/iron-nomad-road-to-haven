@@ -1,12 +1,33 @@
 import * as THREE from 'three';
 import { DEG, lerp } from '../core/math';
 import type { LightState } from '../sim/dayclock';
+import { installAtmosphere, setAtmosphere } from './atmosphere';
+import { GLOBALS, KIT } from './materials';
+import { PostFX } from './post';
+import { SkyDome } from './sky';
+
+// Fog chunks must be replaced before the first material compiles.
+installAtmosphere();
 
 export type QualityPreset = 'low' | 'medium' | 'high';
-export const QUALITY: Record<QualityPreset, { scale: number; shadow: number; zombies: number; draw: number; particles: number }> = {
-  low: { scale: 0.7, shadow: 1024, zombies: 40, draw: 220, particles: 0.5 },
-  medium: { scale: 0.85, shadow: 2048, zombies: 60, draw: 320, particles: 1 },
-  high: { scale: 1.0, shadow: 2048, zombies: 80, draw: 420, particles: 1 },
+export interface QualitySpec {
+  scale: number;
+  shadow: number;
+  zombies: number;
+  draw: number;
+  particles: number;
+  /** HDR target with bloom and grading. Low draws straight to the canvas. */
+  post: boolean;
+  msaa: number;
+  /** Fraction of ground scatter (grass, shrubs, pebbles) to draw. */
+  scatter: number;
+  /** Seconds between environment-map captures. */
+  envEvery: number;
+}
+export const QUALITY: Record<QualityPreset, QualitySpec> = {
+  low: { scale: 0.7, shadow: 1024, zombies: 40, draw: 240, particles: 0.5, post: false, msaa: 0, scatter: 0.3, envEvery: 4 },
+  medium: { scale: 0.85, shadow: 2048, zombies: 60, draw: 330, particles: 1, post: true, msaa: 4, scatter: 0.65, envEvery: 1 },
+  high: { scale: 1.0, shadow: 4096, zombies: 80, draw: 420, particles: 1, post: true, msaa: 4, scatter: 1, envEvery: 0.5 },
 };
 
 export type SplitLayout = 'horizontal' | 'vertical';
@@ -18,6 +39,8 @@ export interface PlayerView {
   /** Point the shadow frustum and sky follow. */
   focus: THREE.Vector3;
   active: boolean;
+  /** This view is a first-person camera: a taller field of view than the chase strip. */
+  first?: boolean;
 }
 
 /** Horizontal FOV is fixed at 100 degrees; vertical is derived with a floor of 32 degrees. */
@@ -25,34 +48,6 @@ export function fovFor(aspect: number, hfovDeg = 100, vfovMinDeg = 32) {
   const v = 2 * Math.atan(Math.tan((hfovDeg * DEG) / 2) / aspect) / DEG;
   return Math.max(vfovMinDeg, v);
 }
-
-const skyVert = `
-varying vec3 vDir;
-void main() {
-  vDir = normalize(position);
-  vec4 p = modelViewMatrix * vec4(position, 1.0);
-  gl_Position = projectionMatrix * p;
-  gl_Position.z = gl_Position.w * 0.9999;
-}`;
-const skyFrag = `
-uniform vec3 uTop; uniform vec3 uHorizon; uniform vec3 uSunDir; uniform vec3 uSunColor; uniform float uNight; uniform float uTime;
-varying vec3 vDir;
-float hash(vec3 p){ p = fract(p * 0.3183099 + .1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
-void main() {
-  vec3 d = normalize(vDir);
-  float h = clamp(d.y, -0.2, 1.0);
-  float t = pow(max(h, 0.0), 0.55);
-  vec3 col = mix(uHorizon, uTop, t);
-  float sd = max(dot(d, normalize(uSunDir)), 0.0);
-  col += uSunColor * (pow(sd, 400.0) * 2.5 + pow(sd, 12.0) * 0.28);
-  // dust haze band hugging the horizon
-  col = mix(col, uHorizon, smoothstep(0.18, 0.0, h) * 0.65);
-  // stars
-  vec3 sp = floor(d * 180.0);
-  float s = step(0.9975, hash(sp)) * smoothstep(0.1, 0.5, d.y);
-  col += vec3(0.9, 0.95, 1.0) * s * uNight;
-  gl_FragColor = vec4(col, 1.0);
-}`;
 
 /** Vertical FOV used in the left/right layout, where a fixed 100 degree horizontal FOV would be a fisheye on a tall half. */
 export const VERTICAL_SPLIT_VFOV = 66;
@@ -63,72 +58,85 @@ export function viewFov(aspect: number, layout: SplitLayout) {
   return layout === 'vertical' ? Math.min(VERTICAL_SPLIT_VFOV, strip) : strip;
 }
 
+/** First person needs more height than the chase strip's 32 degree floor, so the vertical FOV has a higher floor and a cap. */
+export function firstPersonFov(aspect: number, layout: SplitLayout, hfovDeg: number) {
+  const v = fovFor(aspect, hfovDeg, 50);
+  return layout === 'vertical' ? Math.min(v, 85) : v;
+}
+
+/** Shadow box half-size in metres, and how far ahead of the player its centre sits. */
+const SHADOW_HALF = 60;
+const SHADOW_AHEAD = 30;
+
+const _fwd = new THREE.Vector3();
+const _c = new THREE.Vector3();
+const _lx = new THREE.Vector3();
+const _ly = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
+const _z = new THREE.Color();
+const _z2 = new THREE.Color();
+
 export class GameRenderer {
   gl: THREE.WebGLRenderer;
   scene = new THREE.Scene();
   views: [PlayerView, PlayerView];
   sun = new THREE.DirectionalLight(0xffffff, 2);
-  hemi = new THREE.HemisphereLight(0xffffff, 0x886644, 0.9);
+  hemi = new THREE.HemisphereLight(0xffffff, 0x886644, 0.4);
   fog = new THREE.Fog(0xcfc4aa, 60, 340);
-  sky: THREE.Mesh;
-  skyUniforms: Record<string, THREE.IUniform>;
+  sky = new SkyDome();
+  post: PostFX | null = null;
   /** Left/right is the default; top/bottom (the blueprint's strips) is a setting. */
   layout: SplitLayout = 'vertical';
+  /** 1 gives the whole canvas to the first view (solo play); 2 splits it. */
+  seats: 1 | 2 = 2;
   quality: QualityPreset = 'medium';
   renderScale = 1;
   private baseDpr = 1;
   private frameEma = 16;
+  private lastRender = 0;
   night = 0;
   width = 1;
   height = 1;
   sunDir = new THREE.Vector3(0.4, 0.8, 0.3);
   /** Overlay hook: extra callbacks called with each view before it renders (particles, billboards). */
   onBeforeView: ((i: number, cam: THREE.PerspectiveCamera) => void)[] = [];
+  /** Same, called after each view has drawn, to put back whatever a before-hook hid. */
+  onAfterView: ((i: number) => void)[] = [];
+  /** Horizontal field of view of first-person views, degrees. */
+  fpHfov = 100;
   contextLost = false;
   onContextRestored: () => void = () => {};
+  /** 0..1 fade to black applied in the composite (scene transitions). */
+  fade = 1;
+  private floatOk = true;
 
   constructor(public canvas: HTMLCanvasElement) {
-    this.gl = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    this.gl = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', stencil: false });
     this.baseDpr = Math.min(window.devicePixelRatio || 1, 1.75);
-    this.gl.setPixelRatio(this.baseDpr * QUALITY[this.quality].scale);
+    this.floatOk = this.gl.extensions.has('EXT_color_buffer_float') || this.gl.extensions.has('EXT_color_buffer_half_float');
     this.gl.shadowMap.enabled = true;
     this.gl.shadowMap.type = THREE.PCFSoftShadowMap;
     this.gl.toneMapping = THREE.ACESFilmicToneMapping;
-    this.gl.toneMappingExposure = 1.05;
+    this.gl.toneMappingExposure = 1.0;
     this.gl.autoClear = true;
     this.scene.fog = this.fog;
     this.scene.add(this.hemi);
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
+    this.scene.add(this.sky.mesh);
     this.sun.castShadow = true;
-    this.setShadowSize(QUALITY[this.quality].shadow);
     const sc = this.sun.shadow.camera;
-    sc.left = -64;
-    sc.right = 64;
-    sc.top = 64;
-    sc.bottom = -64;
+    sc.left = -SHADOW_HALF;
+    sc.right = SHADOW_HALF;
+    sc.top = SHADOW_HALF;
+    sc.bottom = -SHADOW_HALF;
     sc.near = 1;
-    sc.far = 260;
-    this.sun.shadow.bias = -0.0004;
-    this.sun.shadow.normalBias = 0.6;
+    sc.far = 320;
+    this.sun.shadow.bias = -0.00025;
+    this.sun.shadow.normalBias = 0.35;
+    this.applyQuality();
 
-    this.skyUniforms = {
-      uTop: { value: new THREE.Color(0.35, 0.45, 0.7) },
-      uHorizon: { value: new THREE.Color(0.8, 0.75, 0.65) },
-      uSunDir: { value: this.sunDir },
-      uSunColor: { value: new THREE.Color(1, 0.8, 0.5) },
-      uNight: { value: 0 },
-      uTime: { value: 0 },
-    };
-    this.sky = new THREE.Mesh(
-      new THREE.SphereGeometry(900, 24, 16),
-      new THREE.ShaderMaterial({ uniforms: this.skyUniforms, vertexShader: skyVert, fragmentShader: skyFrag, side: THREE.BackSide, depthWrite: false, fog: false }),
-    );
-    this.sky.frustumCulled = false;
-    this.sky.renderOrder = -10;
-    this.scene.add(this.sky);
-
-    const mkView = (): PlayerView => ({ camera: new THREE.PerspectiveCamera(37, 3.56, 0.15, 900), rect: { x: 0, y: 0, w: 1, h: 1 }, focus: new THREE.Vector3(), active: true });
+    const mkView = (): PlayerView => ({ camera: new THREE.PerspectiveCamera(37, 3.56, 0.2, 2600), rect: { x: 0, y: 0, w: 1, h: 1 }, focus: new THREE.Vector3(), active: true });
     this.views = [mkView(), mkView()];
 
     canvas.addEventListener('webglcontextlost', (e) => {
@@ -143,6 +151,23 @@ export class GameRenderer {
     window.addEventListener('resize', () => this.resize());
   }
 
+  get usePost() {
+    return QUALITY[this.quality].post && this.floatOk;
+  }
+
+  private applyQuality() {
+    const q = QUALITY[this.quality];
+    this.setShadowSize(q.shadow);
+    if (this.usePost) {
+      if (!this.post) this.post = new PostFX(q.msaa);
+      this.gl.setPixelRatio(this.baseDpr * q.scale);
+    } else {
+      this.post?.dispose();
+      this.post = null;
+      this.gl.setPixelRatio(this.baseDpr * q.scale * this.renderScale);
+    }
+  }
+
   setShadowSize(n: number) {
     this.sun.shadow.mapSize.set(n, n);
     if (this.sun.shadow.map) {
@@ -154,13 +179,18 @@ export class GameRenderer {
   setQuality(q: QualityPreset) {
     this.quality = q;
     this.renderScale = 1;
-    this.gl.setPixelRatio(this.baseDpr * QUALITY[q].scale);
-    this.setShadowSize(QUALITY[q].shadow);
+    this.applyQuality();
     this.resize();
   }
 
   setLayout(l: SplitLayout) {
     this.layout = l;
+    this.resize();
+  }
+
+  setSeats(n: 1 | 2) {
+    if (this.seats === n) return;
+    this.seats = n;
     this.resize();
   }
 
@@ -177,7 +207,11 @@ export class GameRenderer {
     this.canvas.style.height = `${h}px`;
     const d = GameRenderer.DIVIDER;
     const [a, b] = this.views;
-    if (this.layout === 'horizontal') {
+    if (this.seats === 1) {
+      // Solo: the whole canvas is one wide view. The second view is parked on the same rect (it is never drawn).
+      a.rect = { x: 0, y: 0, w, h };
+      b.rect = { x: 0, y: 0, w, h };
+    } else if (this.layout === 'horizontal') {
       const hh = Math.floor((h - d) / 2);
       a.rect = { x: 0, y: 0, w, h: hh };
       b.rect = { x: 0, y: hh + d, w, h: h - hh - d };
@@ -186,50 +220,224 @@ export class GameRenderer {
       a.rect = { x: 0, y: 0, w: ww, h };
       b.rect = { x: ww + d, y: 0, w: w - ww - d, h };
     }
+    const layout = this.seats === 1 ? 'horizontal' : this.layout;
     for (const v of this.views) {
       v.camera.aspect = v.rect.w / v.rect.h;
-      v.camera.fov = viewFov(v.camera.aspect, this.layout);
+      this.applyFov(v);
+    }
+  }
+
+  private applyFov(v: PlayerView) {
+    const layout = this.seats === 1 ? 'horizontal' : this.layout;
+    v.camera.fov = v.first ? firstPersonFov(v.camera.aspect, layout, this.fpHfov) : viewFov(v.camera.aspect, layout);
+    v.camera.updateProjectionMatrix();
+  }
+
+  /** Switch a view between the chase strip and first person. Cheap to call every frame: it only rebuilds the projection on a change. */
+  setViewMode(i: number, first: boolean, hfov = this.fpHfov) {
+    const v = this.views[i];
+    if (!!v.first === first && this.fpHfov === hfov) return;
+    v.first = first;
+    this.fpHfov = hfov;
+    for (const o of this.views) this.applyFov(o);
+  }
+
+  /**
+   * Garage preview: each player's view shrinks to a tall strip at their side of the screen, leaving the middle
+   * for a panel. Pass null to return to the normal split.
+   */
+  setPreviewRects(frac: number | null) {
+    if (frac === null) {
+      this.resize();
+      return;
+    }
+    const w = this.width;
+    const h = this.height;
+    const sw = Math.floor(w * frac);
+    const [a, b] = this.views;
+    a.rect = { x: 0, y: 0, w: sw, h };
+    b.rect = this.seats === 1 ? { ...a.rect } : { x: w - sw, y: 0, w: sw, h };
+    for (const v of this.views) {
+      v.camera.aspect = v.rect.w / v.rect.h;
+      v.camera.fov = 60;
       v.camera.updateProjectionMatrix();
     }
   }
 
+  /** Render-target pixels per CSS pixel (particle sizes are in render pixels). */
+  renderPixelRatio() {
+    return this.gl.getPixelRatio() * (this.usePost ? this.postScale() : 1);
+  }
+
+  private postScale() {
+    return Math.round(this.renderScale * 20) / 20;
+  }
+
   /** Apply time-of-day lighting. */
   setLight(l: LightState, biome: 'wasteland' | 'city') {
+    this.sky.mesh.visible = true;
     this.night = l.night;
     const e = l.elevation;
     const az = l.azimuth;
-    this.sunDir.set(Math.cos(az) * Math.sqrt(Math.max(0.05, 1 - e * e)), e, Math.sin(az) * Math.sqrt(Math.max(0.05, 1 - e * e))).normalize();
+    const hz = Math.sqrt(Math.max(0.05, 1 - e * e));
+    this.sunDir.set(Math.cos(az) * hz, e, Math.sin(az) * hz).normalize();
     this.sun.color.setRGB(...l.sunColor);
-    this.sun.intensity = l.sunIntensity;
-    this.hemi.color.setRGB(...l.hemiSky);
-    this.hemi.groundColor.setRGB(...l.hemiGround);
-    this.hemi.intensity = l.hemiIntensity;
-    this.fog.color.setRGB(...l.fog);
+    this.sun.intensity = l.sunIntensity * 1.05;
+    // The day-clock palette is authored as display (sRGB) colours.
+    this.hemi.color.setRGB(...l.hemiSky, THREE.SRGBColorSpace);
+    this.hemi.groundColor.setRGB(...l.hemiGround, THREE.SRGBColorSpace);
+    this.hemi.intensity = l.hemiIntensity * 0.3;
+    this.fog.color.setRGB(...l.fog, THREE.SRGBColorSpace);
     const dist = QUALITY[this.quality].draw;
-    this.fog.near = lerp(biome === 'city' ? 50 : 70, 24, l.night);
-    this.fog.far = lerp(Math.min(dist, biome === 'city' ? 280 : 340), 130, l.night);
-    (this.skyUniforms.uTop.value as THREE.Color).setRGB(l.sky[0] * 0.55, l.sky[1] * 0.65, Math.min(1, l.sky[2] * 0.95 + 0.08 * (1 - l.night)));
-    (this.skyUniforms.uHorizon.value as THREE.Color).setRGB(...l.fog);
-    (this.skyUniforms.uSunColor.value as THREE.Color).setRGB(...l.sunColor);
-    this.skyUniforms.uNight.value = l.night;
+    const city = biome === 'city';
+    // The wasteland has far scenery out to the mountains, so its fog is mostly height haze; the city's
+    // skyline sits close behind the corridor.
+    this.fog.near = lerp(city ? 60 : 160, 22, l.night);
+    this.fog.far = lerp(city ? Math.min(dist * 1.6, 520) : dist * 3.2, 170, l.night);
+    const u = this.sky.uniforms;
+    u.uSunDir.value.copy(this.sunDir);
+    u.uSunColor.value.setRGB(...l.sunColor);
+    u.uHorizon.value.copy(this.fog.color);
+    // Zenith: deep blue by day (greyer over the city), violet at dusk, near black at night.
+    const dusk = Math.min(1, Math.max(0, (l.sky[0] - l.sky[2] - 0.12) / 0.48));
+    // ACES pulls saturated blue toward violet, so the authored zenith leans cyan.
+    const zd = city ? [0.4, 0.52, 0.62] : [0.2, 0.47, 0.76];
+    _z.setRGB(zd[0], zd[1], zd[2], THREE.SRGBColorSpace);
+    _z2.setRGB(0.3, 0.29, 0.5, THREE.SRGBColorSpace);
+    _z.lerp(_z2, dusk);
+    _z2.setRGB(0.012, 0.018, 0.045, THREE.SRGBColorSpace);
+    u.uZenith.value.copy(_z.lerp(_z2, l.night));
+    u.uGround.value.setRGB(l.hemiGround[0] * 0.8, l.hemiGround[1] * 0.75, l.hemiGround[2] * 0.7, THREE.SRGBColorSpace);
+    u.uNight.value = l.night;
+    u.uCloud.value = city ? 0.55 : 0.4;
+    u.uMoonDir.value.set(-this.sunDir.x, Math.max(0.35, this.sunDir.y), -this.sunDir.z).normalize();
+    const scatter = lerp(0.55, 0.12, l.night);
+    u.uScatter.value = scatter;
+    setAtmosphere(this.sunDir, this.sun.color, scatter, lerp(city ? 0.0035 : 0.0016, 0.006, l.night), city ? 0.03 : 0.045, city ? 2 : 0);
+    this.scene.environmentIntensity = lerp(0.85, 0.35, l.night);
+    GLOBALS.uLight.value
+      .copy(this.sun.color)
+      .multiplyScalar(this.sun.intensity * 0.22)
+      .add(_z.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 0.9 + 0.12));
+    KIT.uGlow.value = 1 + l.night * 1.5;
+    // Exposure opens up a little at night so headlights read without crushing everything else.
+    if (this.post) {
+      const p = this.post.params;
+      p.exposure = lerp(1.0, 1.55, l.night);
+      p.saturation = lerp(city ? 0.92 : 1.04, 0.85, l.night);
+      p.bloom = lerp(0.05, 0.09, l.night);
+      if (city) {
+        p.shadowTint.setRGB(0.95, 0.99, 1.04);
+        p.highTint.setRGB(1.01, 1.0, 0.97);
+      } else {
+        p.shadowTint.setRGB(0.97, 0.97, 1.03);
+        p.highTint.setRGB(1.04, 1.0, 0.93);
+      }
+    }
   }
 
-  /** Adaptive resolution: keep the two halves within 0.1 of each other by using one shared scale. */
+  /**
+   * Underground lighting: no sun, no sky, a dim cool ambient, short fog and a lifted exposure, so the only real light
+   * is what the scene puts there (lamps and flashlights). Called every frame by a delve; setLight undoes it.
+   */
+  setInterior(o: { fog: number; near: number; far: number; sky: number; ground: number; ambient: number; exposure: number }) {
+    this.night = 1;
+    this.sky.mesh.visible = false;
+    this.sun.intensity = 0;
+    this.hemi.color.set(o.sky);
+    this.hemi.groundColor.set(o.ground);
+    this.hemi.intensity = o.ambient;
+    this.fog.color.set(o.fog);
+    this.fog.near = o.near;
+    this.fog.far = o.far;
+    this.scene.environmentIntensity = 0.05;
+    _z.set(0x000000);
+    setAtmosphere(this.sunDir, _z, 0, 0, 0.1, 0);
+    GLOBALS.uLight.value.copy(this.hemi.color).multiplyScalar(o.ambient * 0.6 + 0.12);
+    KIT.uGlow.value = 2.4;
+    if (this.post) {
+      const p = this.post.params;
+      p.exposure = o.exposure;
+      p.saturation = 0.9;
+      p.bloom = 0.16;
+      p.shadowTint.setRGB(0.92, 0.98, 1.06);
+      p.highTint.setRGB(1.04, 1.0, 0.94);
+    }
+  }
+
+  /** Adaptive resolution: one shared scale so the two halves always match. */
   adapt(frameMs: number) {
     this.frameEma = lerp(this.frameEma, frameMs, 0.06);
     const q = QUALITY[this.quality];
-    if (this.frameEma > 21 && this.renderScale > 0.62) this.renderScale -= 0.01;
-    else if (this.frameEma < 15.5 && this.renderScale < 1) this.renderScale += 0.005;
-    this.gl.setPixelRatio(this.baseDpr * q.scale * this.renderScale);
+    if (this.frameEma > 21 && this.renderScale > 0.6) this.renderScale -= 0.01;
+    else if (this.frameEma < 15.5 && this.renderScale < 1) this.renderScale = Math.min(1, this.renderScale + 0.005);
+    if (!this.usePost) this.gl.setPixelRatio(this.baseDpr * q.scale * this.renderScale);
+  }
+
+  /** Point the single shadow map at a view: centred ahead of the player and snapped to whole texels. */
+  private aimShadow(v: PlayerView) {
+    v.camera.getWorldDirection(_fwd);
+    _fwd.y = 0;
+    if (_fwd.lengthSq() < 1e-6) _fwd.set(0, 0, 1);
+    _fwd.normalize();
+    _c.copy(v.focus).addScaledVector(_fwd, SHADOW_AHEAD);
+    // Light-space basis matching the shadow camera's lookAt (z toward the sun, y up-ish).
+    _lx.crossVectors(UP, this.sunDir).normalize();
+    _ly.crossVectors(this.sunDir, _lx);
+    const texel = (SHADOW_HALF * 2) / this.sun.shadow.mapSize.x;
+    const px = _c.dot(_lx);
+    const py = _c.dot(_ly);
+    _c.addScaledVector(_lx, Math.round(px / texel) * texel - px).addScaledVector(_ly, Math.round(py / texel) * texel - py);
+    this.sun.target.position.copy(_c);
+    this.sun.position.copy(_c).addScaledVector(this.sunDir, 160);
+    this.sun.target.updateMatrixWorld();
   }
 
   render(time: number) {
     if (this.contextLost) return;
-    this.skyUniforms.uTime.value = time;
+    const now = performance.now();
+    const dtReal = this.lastRender ? Math.min(0.25, (now - this.lastRender) / 1000) : 1 / 60;
+    this.lastRender = now;
     const gl = this.gl;
+    const q = QUALITY[this.quality];
+    this.sky.uniforms.uTime.value = time;
+    GLOBALS.uTime.value = time;
+    this.scene.environment = this.sky.updateEnv(gl, dtReal, q.envEvery);
+    const post = this.usePost ? this.post : null;
+    if (post) {
+      const pr = gl.getPixelRatio();
+      const s = this.postScale();
+      post.setSize(this.width * pr * s, this.height * pr * s);
+      const sx = post.width / this.width;
+      const sy = post.height / this.height;
+      const uv: [number, number, number, number][] = [];
+      for (let i = 0; i < 2; i++) {
+        const v = this.views[i];
+        const r = v.rect;
+        uv.push([r.x / this.width, 1 - (r.y + r.h) / this.height, (r.x + r.w) / this.width, 1 - r.y / this.height]);
+        if (!v.active) continue;
+        const x = Math.round(r.x * sx);
+        const y = Math.round((this.height - r.y - r.h) * sy);
+        const w = Math.round((r.x + r.w) * sx) - x;
+        const h = Math.round((this.height - r.y) * sy) - y;
+        post.hdr.viewport.set(x, y, w, h);
+        post.hdr.scissor.set(x, y, w, h);
+        post.hdr.scissorTest = true;
+        gl.setRenderTarget(post.hdr);
+        this.renderView(i);
+      }
+      post.hdr.scissorTest = false;
+      const a = this.views[0].active ? uv[0] : uv[1];
+      const b = this.views[1].active ? uv[1] : uv[0];
+      post.setRects(a, b);
+      gl.setRenderTarget(null);
+      gl.setViewport(0, 0, this.width, this.height);
+      gl.setScissorTest(false);
+      post.finish(gl, time, this.width * pr, this.height * pr, this.fade);
+      return;
+    }
+    gl.setRenderTarget(null);
     gl.setScissorTest(true);
-    const dpr = gl.getPixelRatio();
-    void dpr;
     for (let i = 0; i < 2; i++) {
       const v = this.views[i];
       if (!v.active) continue;
@@ -238,15 +446,18 @@ export class GameRenderer {
       const y = this.height - (r.y + r.h);
       gl.setViewport(r.x, y, r.w, r.h);
       gl.setScissor(r.x, y, r.w, r.h);
-      this.sky.position.copy(v.camera.position);
-      // Re-aim the single shadow map at this player.
-      const f = v.focus;
-      this.sun.target.position.copy(f);
-      this.sun.position.copy(f).addScaledVector(this.sunDir, 130);
-      this.sun.target.updateMatrixWorld();
-      for (const cb of this.onBeforeView) cb(i, v.camera);
-      gl.render(this.scene, v.camera);
+      this.renderView(i);
     }
     gl.setScissorTest(false);
   }
+
+  private renderView(i: number) {
+    const v = this.views[i];
+    this.sky.mesh.position.copy(v.camera.position);
+    this.aimShadow(v);
+    for (const cb of this.onBeforeView) cb(i, v.camera);
+    this.gl.render(this.scene, v.camera);
+    for (const cb of this.onAfterView) cb(i);
+  }
 }
+

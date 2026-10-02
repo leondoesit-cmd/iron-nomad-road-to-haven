@@ -1,0 +1,407 @@
+import { PARTS, PART_SLOTS, partDef, type Cost, type PartSlot } from '../data';
+import type { Campaign } from '../game/campaign';
+import { PLAYER_CSS } from '../render/palette';
+import { canAfford, costText, spend } from '../sim/resources';
+import { OIL_CAN, OIL_LOW, pourOil } from '../sim/oil';
+import { type VehicleBuild, buildName, currentCond, defOf, installPart, maxHpOf, needsService, removePart, serviceBuild, serviceCost, statsOf, conditionSummary, dismantleYield, GARAGE_MAX } from '../sim/garage';
+import { RARITY_CSS, RARITY_NAMES, conditionLabel, describeStats, newPart, partName, scrapValue, slotsOf, type PartItem } from '../sim/parts';
+import { escapeHtml } from './hud';
+import type { FocusItem } from './focus';
+import type { Game } from '../game/game';
+import type { Vehicle } from '../game/vehicle';
+
+type Act = (player: number) => void;
+
+/** What a garage page needs from whatever hosts it: the Dawn Ledger tab, or the field workbench. */
+export interface GarageHost {
+  c: Campaign;
+  /** The build shown for a player's column. */
+  build(i: number): VehicleBuild;
+  btn(id: string, label: string, act: Act, enabled?: boolean, title?: string): string;
+  /** Rebuild the 3D vehicles after something changed. */
+  refresh(): void;
+  rerender(): void;
+  say(msg: string, ok: boolean): void;
+  /** Ledger: both players, fabrication, the yard and servicing. Workbench: one vehicle, fitting only. */
+  mode: 'ledger' | 'field';
+  /** Players whose vehicles are shown. */
+  players: number[];
+}
+
+/**
+ * The garage: fit parts, paint, fabricate, manage the yard. Pure HTML plus actions; the host owns rendering and focus.
+ */
+export class GarageView {
+  sel: { i: number; slot: PartSlot } | null = null;
+  /** A vehicle uid waiting for a second press to confirm breaking it down. */
+  private armed: string | null = null;
+
+  constructor(private h: GarageHost) {}
+
+  private get c() {
+    return this.h.c;
+  }
+  private get field() {
+    return this.h.mode === 'field';
+  }
+
+  html(): string {
+    const cols = this.h.players.map((i) => this.vehicleCard(i)).join('');
+    return `<div class="gtop">${cols}</div><div class="gfoot">${this.pickerHtml()}${this.stockHtml()}${this.field ? '' : this.yardHtml()}</div>`;
+  }
+
+  // ------------------------------------------------------------------ vehicle card
+
+  private pips(mk: number) {
+    return mk ? `<i style="color:${RARITY_CSS[mk]}">${'◆'.repeat(mk)}</i>` : '';
+  }
+
+  private vehicleCard(i: number) {
+    const c = this.c;
+    const b = this.h.build(i);
+    const def = defOf(b);
+    const st = statsOf(b);
+    const allowed = slotsOf(def);
+    const lines: string[] = [];
+    lines.push(
+      `<h4><span class="pcolor" style="background:${PLAYER_CSS[i]}"></span>${escapeHtml(c.players[i].name.toUpperCase())} · ${escapeHtml(buildName(b))}</h4>`,
+      `<div class="sub2">HP ${Math.round(b.hp * maxHpOf(b))}/${Math.round(maxHpOf(b))} · ARMOUR ${Math.round(st.armor * 100)}% · TANK ${st.tank.toFixed(0)} FU · TOP ${Math.round(def.topSpeedKmh * st.topSpeedMult)} km/h · CARGO ${Math.round(st.cargo)} · <span class="${b.comp.oil < OIL_LOW ? 'bad' : ''}">OIL ${Math.round(b.comp.oil * 100)}%</span></div>`,
+      `<div class="sub2">${escapeHtml(conditionSummary(b)).toUpperCase()}${st.weapon ? ' · ARMED' : ''}</div>`,
+    );
+    const slotBtns = PART_SLOTS.map((slot) => {
+      const ok = allowed.includes(slot);
+      const it = b.fit[slot];
+      const sel = this.sel?.i === i && this.sel.slot === slot;
+      let main = it ? escapeHtml(partName(it)) : ok ? 'Stock' : '—';
+      let note = '';
+      if (it && (slot === 'engine' || slot === 'wheels' || slot === 'armor')) {
+        const cond = currentCond(b, slot);
+        note = ` <em class="${cond < 0.35 ? 'bad' : cond < 0.7 ? 'mid' : ''}">${Math.round(cond * 100)}%</em>`;
+      }
+      if (!it && ok && (slot === 'engine' || slot === 'wheels' || slot === 'armor')) {
+        const cond = currentCond(b, slot);
+        if (cond < 0.999) note = ` <em class="${cond < 0.35 ? 'bad' : 'mid'}">${Math.round(cond * 100)}%</em>`;
+      }
+      return this.h.btn(
+        `slot${i}-${slot}`,
+        `<small>${PARTS.labels[slot]}${it ? this.pips(partDef(it.id).mk) : ''}</small><b>${main}</b>${note}`,
+        () => this.pick(i, slot),
+        ok,
+        ok ? '' : `A ${def.name} has no ${PARTS.labels[slot].toLowerCase()} mount`,
+      ).replace('<button', `<button class="slotbtn${sel ? ' sel' : ''}${it ? ' fitted' : ''}"`);
+    });
+    lines.push(`<div class="slotgrid">${slotBtns.join('')}</div>`);
+    // Paint and stripes.
+    const sw = PARTS.paints.map((pn) =>
+      this.h
+        .btn(`paint${i}-${pn.id}`, `<span class="sw${b.paint === pn.c ? ' on' : ''}" style="background:#${pn.c.toString(16).padStart(6, '0')}"></span>`, () => this.paint(i, pn.c), true, pn.name)
+        .replace('<button', '<button class="swbtn"'),
+    );
+    lines.push(`<div class="swatches">${sw.join('')}</div>`);
+    const stripes = PARTS.stripes.map((s, idx) => this.h.btn(`stripe${i}-${idx}`, s.name, () => this.stripe(i, idx), true).replace('<button', `<button class="chipbtn${b.stripe === idx ? ' on' : ''}"`));
+    lines.push(`<div class="stripes">${stripes.join('')}</div>`);
+    if (b.stripe > 0) {
+      const cols = [0xe9dfc7, 0x1c1c1c, 0xc2402e, 0xe0be1a].map((col) =>
+        this.h.btn(`scol${i}-${col}`, `<span class="sw${b.stripeColor === col ? ' on' : ''}" style="background:#${col.toString(16).padStart(6, '0')}"></span>`, () => this.stripeColor(i, col), true).replace('<button', '<button class="swbtn"'),
+      );
+      lines.push(`<div class="swatches small">${cols.join('')}</div>`);
+    }
+    if (def.physics.kind !== 'boat') {
+      const need = b.comp.oil < 0.95;
+      lines.push(
+        `<div class="btns">${this.h.btn(`oil${i}`, `Top up oil <span class="cost">${need ? `${Math.round(c.items.oil * 100)}% in reserve` : 'full'}</span>`, () => this.topUpOil(i), need && c.items.oil > 0.02, need ? (c.items.oil > 0.02 ? '' : 'No oil in reserve: find cans along the road') : '')}</div>`,
+      );
+    }
+    if (!this.field) {
+      const cost = serviceCost(b);
+      lines.push(
+        `<div class="btns">${this.h.btn(`svc${i}`, `Full service <span class="cost">${needsService(b) ? costText(cost) : 'not needed'}</span>`, () => this.service(i, cost), needsService(b) && canAfford(c.stocks, cost))}</div>`,
+      );
+    }
+    return `<div class="card gcard p${i + 1}">${lines.join('')}</div>`;
+  }
+
+  // ------------------------------------------------------------------ picker
+
+  private pickerHtml(): string {
+    if (!this.sel) {
+      return `<div class="gpanel"><h3>Fit a part</h3><div class="mutedtxt">Choose a slot on a vehicle to fit, replace or fabricate a part. Paint is free.</div></div>`;
+    }
+    const { i, slot } = this.sel;
+    const c = this.c;
+    const b = this.h.build(i);
+    const def = defOf(b);
+    const cur = b.fit[slot];
+    const rows: string[] = [];
+    rows.push(`<h3>${escapeHtml(PARTS.labels[slot])} · ${escapeHtml(c.players[i].name)}'s ${escapeHtml(def.name)}</h3>`);
+    if (cur) {
+      const d = partDef(cur.id);
+      const cond = currentCond(b, slot);
+      rows.push(
+        `<div class="partrow now"><b style="color:${RARITY_CSS[d.mk]}">${escapeHtml(d.name)}</b> <span class="cost">${RARITY_NAMES[d.mk]}${slot === 'engine' || slot === 'wheels' || slot === 'armor' ? ` · ${conditionLabel(cond)} ${Math.round(cond * 100)}%` : ''}</span><div class="mutedtxt">${escapeHtml(describeStats(d.stats).join(' · '))}</div>${this.h.btn(`rm${i}`, 'Take it off', () => this.remove(i, slot), true)}</div>`,
+      );
+    } else rows.push(`<div class="mutedtxt">Stock fittings.</div>`);
+    const stock = c.inventory.filter((it) => partDef(it.id).slot === slot).sort((a, z) => partDef(z.id).mk - partDef(a.id).mk || z.cond - a.cond);
+    rows.push(`<div class="mutedtxt gh">In the trucks</div>`);
+    if (!stock.length) rows.push(`<div class="mutedtxt">Nothing for this slot.</div>`);
+    for (const it of stock) {
+      const d = partDef(it.id);
+      const worn = slot === 'engine' || slot === 'wheels' || slot === 'armor';
+      rows.push(
+        `<div class="partrow">${this.h.btn(`fit${i}-${it.uid}`, `<b style="color:${RARITY_CSS[d.mk]}">${escapeHtml(d.name)}</b> <span class="cost">Mk${d.mk}${worn ? ` · ${Math.round(it.cond * 100)}%` : ''}</span><br><small>${escapeHtml(describeStats(d.stats).join(' · '))}</small>`, () => this.fit(i, it), true).replace('<button', '<button class="wide"')}</div>`,
+      );
+    }
+    if (!this.field) {
+      rows.push(`<div class="mutedtxt gh">Fabricate (needs the workshop)</div>`);
+      for (const d of PARTS.parts.filter((p) => p.slot === slot).sort((a, z) => a.mk - z.mk)) {
+        const ok = canAfford(c.stocks, d.cost);
+        rows.push(
+          `<div class="partrow">${this.h.btn(`mk${i}-${d.id}`, `<b style="color:${RARITY_CSS[d.mk]}">${escapeHtml(d.name)}</b> <span class="cost">${costText(d.cost)}</span><br><small>${escapeHtml(describeStats(d.stats).join(' · '))}</small>`, () => this.fabricate(i, d.id, d.cost), ok).replace('<button', '<button class="wide"')}</div>`,
+        );
+      }
+    }
+    rows.push(`<div class="btns">${this.h.btn('closepick', 'Done', () => this.close(), true)}</div>`);
+    return `<div class="gpanel picker">${rows.join('')}</div>`;
+  }
+
+  // ------------------------------------------------------------------ spare parts
+
+  private stockHtml(): string {
+    const c = this.c;
+    const cap = c.inventoryCap;
+    const rows = c.inventory
+      .slice()
+      .sort((a, z) => partDef(a.id).slot.localeCompare(partDef(z.id).slot) || partDef(z.id).mk - partDef(a.id).mk)
+      .map((it) => {
+        const d = partDef(it.id);
+        const worn = d.slot === 'engine' || d.slot === 'wheels' || d.slot === 'armor';
+        const scrap = scrapValue(it);
+        return `<div class="stockline"><span><b style="color:${RARITY_CSS[d.mk]}">${escapeHtml(d.name)}</b> <small>${PARTS.labels[d.slot]}${worn ? ` · ${Math.round(it.cond * 100)}%` : ''}</small></span>${this.field ? '' : this.h.btn(`brk${it.uid}`, `Scrap <span class="cost">+${scrap}</span>`, () => this.breakDown(it, scrap), true)}</div>`;
+      });
+    return `<div class="gpanel"><h3>Spare parts <small>${c.inventory.length}/${cap}</small></h3>${rows.length ? `<div class="stocklist">${rows.join('')}</div>` : '<div class="mutedtxt">No spare parts. Strip wrecks with the crowbar, or pick them up along the road.</div>'}<div class="mutedtxt">Reserve cans: ${c.stocks.fuel.toFixed(1)} FU fuel · ${Math.round(c.items.oil * 100)}% oil (${(c.items.oil / OIL_CAN).toFixed(1)} cans). Cargo space on your vehicles sets how much the convoy can carry.</div></div>`;
+  }
+
+  // ------------------------------------------------------------------ yard
+
+  private yardHtml(): string {
+    const c = this.c;
+    const rows = c.garage.map((b) => {
+      const seats = this.h.players;
+      const owner = seats.find((i) => c.players[i].vehicle === b.uid);
+      const y = dismantleYield(b);
+      const armed = this.armed === b.uid;
+      const assign = seats.map((i) =>
+        this.h.btn(`as${i}-${b.uid}`, escapeHtml(c.players[i].name.toUpperCase()), () => this.assign(i, b.uid), owner !== i && (c.solo || c.players[1 - i].vehicle !== b.uid), owner === i ? 'Already rolling out in this one' : '').replace('<button', `<button class="pbtn p${i + 1}${owner === i ? ' on' : ''}"`),
+      );
+      return `<div class="yardrow"><div><b>${escapeHtml(buildName(b))}</b> <small>${escapeHtml(conditionSummary(b))}${Object.keys(b.fit).length ? ` · ${Object.keys(b.fit).length} parts` : ''}</small></div><div class="btns">${assign.join('')}${this.h.btn(`strip${b.uid}`, armed ? 'Confirm?' : `Break down <span class="cost">+${y.stocks.scrap ?? 0}S +${y.stocks.parts ?? 0}P</span>`, () => this.dismantle(b.uid), owner === undefined, owner !== undefined ? 'Rolling out in this one' : 'Parts come back to the trucks')}</div></div>`;
+    });
+    return `<div class="gpanel"><h3>The yard <small>${c.garage.length}/${GARAGE_MAX}</small></h3>${rows.join('')}<div class="mutedtxt">Vehicles you drive up to are added here. Past ${GARAGE_MAX}, the convoy breaks the least useful spare down for scrap.</div></div>`;
+  }
+
+  // ------------------------------------------------------------------ actions
+
+  private pick(i: number, slot: PartSlot) {
+    this.sel = this.sel?.i === i && this.sel.slot === slot ? null : { i, slot };
+    this.h.rerender();
+  }
+
+  close() {
+    this.sel = null;
+    this.h.rerender();
+  }
+
+  private fit(i: number, it: PartItem) {
+    const c = this.c;
+    const b = this.h.build(i);
+    const taken = c.takePart(it.uid);
+    if (!taken) return;
+    const res = installPart(b, taken);
+    if (!res.ok) {
+      c.inventory.push(taken);
+      return this.h.say(res.reason ?? 'It does not fit', false);
+    }
+    if (res.removed) c.addPart(res.removed);
+    this.h.refresh();
+    this.h.say(`${partName(taken)} fitted${res.removed ? `; ${partName(res.removed)} goes back in the trucks` : ''}.`, true);
+  }
+
+  private remove(i: number, slot: PartSlot) {
+    const c = this.c;
+    const out = removePart(this.h.build(i), slot);
+    if (!out) return;
+    const r = c.addPart(out);
+    this.h.refresh();
+    this.h.say(r.stored ? `${partName(out)} taken off.` : `${partName(out)} taken off and scrapped: the trucks are full.`, r.stored);
+  }
+
+  private fabricate(i: number, id: string, cost: Cost) {
+    const c = this.c;
+    const b = this.h.build(i);
+    if (!spend(c.stocks, cost)) return this.h.say('Not enough stock', false);
+    const res = installPart(b, newPart(id, 1));
+    if (!res.ok) {
+      this.h.say(res.reason ?? 'It does not fit', false);
+      return;
+    }
+    if (res.removed) c.addPart(res.removed);
+    this.h.refresh();
+    this.h.say(`${partDef(id).name} built and fitted.`, true);
+  }
+
+  private breakDown(it: PartItem, scrap: number) {
+    const c = this.c;
+    if (!c.takePart(it.uid)) return;
+    c.stocks.scrap += scrap;
+    this.h.say(`${partName(it)} broken down for ${scrap} Scrap.`, true);
+  }
+
+  private topUpOil(i: number) {
+    const c = this.c;
+    const b = this.h.build(i);
+    const r = pourOil(b.comp.oil, c.items.oil);
+    if (r.used <= 0) return;
+    b.comp.oil = r.oil;
+    c.items.oil = Math.max(0, c.items.oil - r.used);
+    this.h.refresh();
+    this.h.say(`Oil topped up to ${Math.round(r.oil * 100)}%.`, true);
+  }
+
+  private paint(i: number, col: number) {
+    this.h.build(i).paint = col;
+    this.h.refresh();
+  }
+  private stripe(i: number, idx: number) {
+    this.h.build(i).stripe = idx;
+    this.h.refresh();
+  }
+  private stripeColor(i: number, col: number) {
+    this.h.build(i).stripeColor = col;
+    this.h.refresh();
+  }
+
+  private service(i: number, cost: Cost) {
+    const c = this.c;
+    if (!spend(c.stocks, cost)) return this.h.say('Not enough stock', false);
+    serviceBuild(this.h.build(i));
+    this.h.refresh();
+    this.h.say(`${c.players[i].name}'s ride is serviced.`, true);
+  }
+
+  private assign(i: number, uid: string) {
+    const c = this.c;
+    c.players[i].vehicle = uid;
+    c.settleActives();
+    this.sel = null;
+    this.h.refresh();
+    this.h.say(`${c.players[i].name} will roll out in the ${buildName(this.h.build(i))}.`, true);
+  }
+
+  private dismantle(uid: string) {
+    const c = this.c;
+    if (this.armed !== uid) {
+      this.armed = uid;
+      return this.h.rerender();
+    }
+    this.armed = null;
+    const b = c.buildByUid(uid);
+    if (!b) return;
+    const y = dismantleYield(b);
+    for (const k of Object.keys(y.stocks) as (keyof typeof y.stocks)[]) c.stocks[k] += y.stocks[k] ?? 0;
+    for (const it of y.items) c.addPart(it);
+    c.removeVehicle(uid);
+    this.h.say(`${buildName(b)} broken down: ${y.stocks.scrap ?? 0} Scrap, ${y.stocks.parts ?? 0} Parts and ${y.items.length} fitted parts recovered.`, true);
+  }
+}
+
+/**
+ * The field workbench: opens next to one of your vehicles mid-leg, pauses the game, and lets you fit and paint it.
+ * Fabrication, the yard and full services wait for camp.
+ */
+export class Workbench {
+  private acts = new Map<string, Act>();
+  private view: GarageView;
+  private msg = '';
+  private v: Vehicle | null = null;
+  private owner = 0;
+
+  constructor(
+    private game: Game,
+    private root: HTMLElement,
+    private onClose: () => void,
+  ) {
+    const self = this;
+    this.view = new GarageView({
+      c: game.campaign,
+      mode: 'field',
+      get players() {
+        return [self.owner];
+      },
+      build: () => self.v!.build!,
+      btn: (id, label, act, enabled = true, title = '') => {
+        this.acts.set(id, act);
+        return `<button data-fid="${id}" ${enabled ? '' : 'disabled'} title="${escapeHtml(title)}">${label}</button>`;
+      },
+      refresh: () => this.refresh(),
+      rerender: () => this.render(),
+      say: (m, ok) => {
+        this.msg = m;
+        this.game.audio.play(ok ? 'confirm' : 'deny');
+        this.render();
+      },
+    });
+  }
+
+  open(v: Vehicle, owner: number) {
+    this.v = v;
+    this.owner = owner;
+    // Edit the build directly, starting from the vehicle's live condition.
+    v.commit();
+    this.view.sel = null;
+    this.msg = '';
+    this.game.focus.active = true;
+    this.game.focus.onCancel = () => this.close();
+    this.render();
+  }
+
+  private refresh() {
+    this.v?.syncFromBuild();
+    this.render();
+  }
+
+  close() {
+    this.game.focus.clear();
+    this.game.focus.active = false;
+    this.game.focus.onCancel = () => {};
+    this.root.innerHTML = '';
+    this.root.classList.remove('on');
+    this.onClose();
+  }
+
+  render() {
+    const g = this.game;
+    const v = this.v;
+    if (!v) return;
+    const keys = g.focus.keys();
+    this.acts.clear();
+    const body = this.view.html();
+    this.root.classList.add('on');
+    this.root.innerHTML = `<div class="ledger panel paper bench">
+      <h2><span>Workbench · ${escapeHtml(v.def.name)}</span><small>${escapeHtml(g.campaign.players[this.owner].name.toUpperCase())} · THE GAME IS PAUSED</small></h2>
+      <div class="gbody">${body}</div>
+      <div class="benchfoot"><span class="mutedtxt">${escapeHtml(this.msg)}</span>${this.btnHtml('benchdone', 'Back to the road', () => this.close())}</div>
+    </div>`;
+    this.root.querySelectorAll<HTMLElement>('button').forEach((b) => (b.style.pointerEvents = 'auto'));
+    const items: FocusItem[] = [];
+    this.root.querySelectorAll<HTMLElement>('[data-fid]').forEach((el) => {
+      const act = this.acts.get(el.dataset.fid!);
+      if (act) items.push({ el, press: (p) => act(p), disabled: (el as HTMLButtonElement).disabled });
+    });
+    g.focus.setItems(items, keys);
+    g.focus.active = true;
+  }
+
+  private btnHtml(id: string, label: string, act: Act) {
+    this.acts.set(id, act);
+    return `<button data-fid="${id}">${label}</button>`;
+  }
+}

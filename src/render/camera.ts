@@ -26,6 +26,13 @@ export interface CamParams {
   shoulder: number;
   lookBack: boolean;
   zoom: number;
+  /** Mouse aiming: follow the aim with almost no smoothing so the view tracks the hand. */
+  crisp?: boolean;
+  /**
+   * First person: the world position of the player's eyes. The camera sits exactly there and looks along the aim
+   * (on foot and at the gun) or along the vehicle's heading plus `lookYaw` / `lookPitch` (driving).
+   */
+  eye?: THREE.Vector3 | null;
 }
 
 /**
@@ -59,6 +66,10 @@ export class ChaseCamera {
 
   update(dt: number, t: CamTarget, mode: CamMode, p: CamParams) {
     this.mode = mode;
+    if (p.eye) {
+      this.updateFirst(dt, t, mode, p, p.eye);
+      return;
+    }
     const speedFrac = clamp(t.speed / Math.max(1, t.topSpeed), 0, 1);
     const targetDist = p.dist * (1 + 0.25 * speedFrac);
     const targetHeight = p.height;
@@ -112,7 +123,8 @@ export class ChaseCamera {
     const gy = this.groundAt(desired.x, desired.z) + 0.7;
     if (desired.y < gy) desired.y = gy;
 
-    const posK = mode === 'foot' || mode === 'gunner' ? 22 : 14;
+    const posK = mode === 'foot' || mode === 'gunner' ? (p.crisp ? 45 : 22) : 14;
+    const lookK = p.crisp ? 90 : 18;
     if (!this.initialized) {
       this.pos.copy(desired);
       this.look.copy(lookAt);
@@ -121,13 +133,39 @@ export class ChaseCamera {
       this.pos.x = damp(this.pos.x, desired.x, posK, dt);
       this.pos.y = damp(this.pos.y, desired.y, posK, dt);
       this.pos.z = damp(this.pos.z, desired.z, posK, dt);
-      this.look.x = damp(this.look.x, lookAt.x, 18, dt);
-      this.look.y = damp(this.look.y, lookAt.y, 18, dt);
-      this.look.z = damp(this.look.z, lookAt.z, 18, dt);
+      this.look.x = damp(this.look.x, lookAt.x, lookK, dt);
+      this.look.y = damp(this.look.y, lookAt.y, lookK, dt);
+      this.look.z = damp(this.look.z, lookAt.z, lookK, dt);
     }
     this.fwd.set(this.look.x - this.pos.x, 0, this.look.z - this.pos.z).normalize();
 
     // Shake
+    this.shakeT += dt * 38;
+    this.shake = Math.max(0, this.shake - dt * 2.4);
+  }
+
+  /** First person: no orbit, no occlusion, no smoothing on foot. The eye is inside the capsule, clear of walls. */
+  private updateFirst(dt: number, t: CamTarget, mode: CamMode, p: CamParams, eye: THREE.Vector3) {
+    let yaw: number;
+    let pitch: number;
+    if (mode === 'vehicle' || mode === 'camp') {
+      // Chassis heading, with a little filtering so suspension judder does not shake the view; the stick or mouse looks around.
+      const base = t.yaw + (p.lookBack ? Math.PI : 0) + p.lookYaw;
+      this.yaw = this.initialized ? dampAngle(this.yaw, base, 30, dt) : base;
+      yaw = this.yaw;
+      pitch = p.lookPitch;
+    } else {
+      yaw = this.yaw = p.aimYaw;
+      pitch = p.aimPitch;
+    }
+    const cp = Math.cos(pitch);
+    this.pos.copy(eye);
+    this.look.set(eye.x + Math.sin(yaw) * cp * 25, eye.y + Math.sin(pitch) * 25, eye.z + Math.cos(yaw) * cp * 25);
+    this.initialized = true;
+    this.fwd.set(Math.sin(yaw), 0, Math.cos(yaw));
+    // Keep the orbit distances warm so leaving first person eases out instead of jumping.
+    this.dist = damp(this.dist, p.dist, 3.5, dt);
+    this.height = damp(this.height, p.height, 3.5, dt);
     this.shakeT += dt * 38;
     this.shake = Math.max(0, this.shake - dt * 2.4);
   }

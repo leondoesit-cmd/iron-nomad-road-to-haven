@@ -1,22 +1,14 @@
-import { LEGS, MERCS, MODULE_SLOTS, VEHICLES, legById, vehicleDef, STRUCTURES, type Cost, type ModuleSlot, type StockId } from '../data';
+import { LEGS, MERCS, VEHICLES, PARTS, legById, STRUCTURES, type Cost, type StockId } from '../data';
 import { FocusUI, type FocusItem } from './focus';
 import { escapeHtml } from './hud';
 import { PLAYER_CSS } from '../render/palette';
-import {
-  LABEL,
-  RECIPES,
-  canAfford,
-  checkTierUp,
-  costText,
-  effectiveStats,
-  moduleCost,
-  spend,
-  whole,
-} from '../sim/resources';
+import { LABEL, RECIPES, canAfford, checkTierUp, costText, spend, whole } from '../sim/resources';
+import { buildName, defOf, maxHpOf, needsService, rebuildOnto, serviceBuild, serviceCost, statsOf } from '../sim/garage';
 import { loyaltyBand, settleCut } from '../sim/loyalty';
 import { moraleOf } from '../sim/loyalty';
 import type { Game } from '../game/game';
 import type { CampScene } from '../game/campScene';
+import { GarageView } from './garage';
 
 type Act = (player: number) => void;
 
@@ -28,8 +20,9 @@ export class LedgerPanel {
   private acts = new Map<string, Act>();
   private chosen = 0;
   private ready: [boolean, boolean] = [false, false];
-  private tab: 'main' | 'trade' = 'main';
+  private tab: 'main' | 'garage' = 'main';
   private msg = '';
+  private garage: GarageView;
 
   constructor(
     private game: Game,
@@ -37,13 +30,42 @@ export class LedgerPanel {
     private camp: CampScene,
     private depart: (nextLeg: string) => void,
     private sliceEnd: () => void,
-  ) {}
+  ) {
+    const self = this;
+    this.garage = new GarageView({
+      get c() {
+        return self.c;
+      },
+      mode: 'ledger',
+      players: this.game.campaign.solo ? [0] : [0, 1],
+      build: (i) => self.c.buildOf(i),
+      btn: (id, label, act, enabled, title) => self.btn(id, label, act, enabled, title),
+      refresh: () => {
+        self.camp.refreshVehicles();
+        self.render();
+      },
+      rerender: () => self.render(),
+      say: (m, ok) => (ok ? self.ok(m) : self.warn(m)),
+    });
+  }
+
+  /** The garage tab shrinks both players' views to side strips so the vehicles stay visible next to the panel. */
+  private setPreview(on: boolean) {
+    this.camp.preview = on;
+    this.game.R.setPreviewRects(on ? 0.22 : null);
+    const div = document.getElementById('divider');
+    if (div) div.style.display = on || this.c.solo ? 'none' : '';
+  }
 
   private get c() {
     return this.game.campaign;
   }
 
   open() {
+    const trimmed = this.c.trimGarage();
+    if (trimmed.length) this.say(`The yard was full: ${trimmed.map((t) => `${t.name} (+${t.scrap} Scrap)`).join(', ')} broken down.`);
+    this.tab = 'main';
+    this.setPreview(false);
     this.game.focus.active = true;
     this.game.focus.onCancel = () => {};
     this.render();
@@ -92,16 +114,25 @@ export class LedgerPanel {
       <div class="card"><div class="btns">${RECIPES.map((r) => this.btn(`craft-${r.id}`, `${r.name} <span class="cost">${costText(r.cost)}</span>`, () => this.craft(r.id), canAfford(c.stocks, r.cost))).join('')}</div></div>
       ${hub?.features.includes('trade') ? `<h3>Trader</h3><div class="card"><div class="btns">${this.tradeButtons()}</div></div>` : ''}
       </section>`;
-    const cards = [0, 1].map((i) => this.vehicleCard(i)).join('');
+    const cards = (c.solo ? [0] : [0, 1]).map((i) => this.vehicleCard(i)).join('');
     const mid = `<section><h3>Vehicles</h3>${cards}<div class="mutedtxt">Tanks are filled from the convoy reserve (${c.stocks.fuel.toFixed(1)} FU) when you roll out. Upgrades take effect straight away.</div></section>`;
     const right = `<section><h3>Crew</h3>${this.crewHtml(owedTotal)}<h3>Next road</h3>${this.routeHtml()}</section>`;
-    this.root.innerHTML = `<div class="ledger panel paper">
-      <h2><span>Dawn Ledger · ${escapeHtml(leg.name)}${hub ? ' · ' + escapeHtml(hub.name) : ''}</span><small>DAY ${c.day} · MORALE ${Math.round(moraleOf(c.crew))} · ${hub?.safeNight ? 'SAFE NIGHT' : 'ROADSIDE CAMP'}</small></h2>
-      ${left}${mid}${right}
-      <div style="grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;gap:12px;border-top:2px solid rgba(38,28,16,.4);padding-top:6px">
+    const tabs = `<span class="tabs">${this.btn('tab-main', 'Ledger', () => this.setTab('main'), true).replace('<button', `<button class="tabbtn${this.tab === 'main' ? ' on' : ''}"`)}${this.btn('tab-garage', `Garage${c.inventory.length ? ` <small>${c.inventory.length} parts</small>` : ''}`, () => this.setTab('garage'), true).replace('<button', `<button class="tabbtn${this.tab === 'garage' ? ' on' : ''}"`)}</span>`;
+    const foot = `<div style="grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;gap:12px;border-top:2px solid rgba(38,28,16,.4);padding-top:6px">
         <span class="mutedtxt" id="ledger-msg">${escapeHtml(this.msg)}</span>
         <span style="display:flex;gap:10px;align-items:center">${this.readyHtml()}</span>
-      </div></div>`;
+      </div>`;
+    if (this.tab === 'garage') {
+      this.root.innerHTML = `<div class="ledger panel paper gmode">
+        <h2><span>Garage · ${escapeHtml(leg.name)}</span>${tabs}<small>DAY ${c.day} · ${whole(c.stocks.scrap)} SCRAP · ${whole(c.stocks.parts)} PARTS · ${whole(c.stocks.tech)} TECH</small></h2>
+        <div class="gbody">${this.garage.html()}</div>
+        ${foot}</div>`;
+    } else {
+      this.root.innerHTML = `<div class="ledger panel paper">
+      <h2><span>Dawn Ledger · ${escapeHtml(leg.name)}${hub ? ' · ' + escapeHtml(hub.name) : ''}</span>${tabs}<small>DAY ${c.day} · MORALE ${Math.round(moraleOf(c.crew))} · ${hub?.safeNight ? 'SAFE NIGHT' : 'ROADSIDE CAMP'}</small></h2>
+      ${left}${mid}${right}
+      ${foot}</div>`;
+    }
     this.root.querySelectorAll<HTMLElement>('button').forEach((b) => (b.style.pointerEvents = 'auto'));
     const items: FocusItem[] = [];
     this.root.querySelectorAll<HTMLElement>('[data-fid]').forEach((el) => {
@@ -111,6 +142,15 @@ export class LedgerPanel {
       items.push({ el, press: (p) => act(p), disabled: (el as HTMLButtonElement).disabled });
     });
     g.focus.setItems(items, keys);
+  }
+
+  private setTab(t: 'main' | 'garage') {
+    if (this.tab === t) return;
+    this.tab = t;
+    this.garage.sel = null;
+    this.setPreview(t === 'garage');
+    this.game.audio.play('click');
+    this.render();
   }
 
   // ------------------------------------------------------------------ pieces
@@ -142,24 +182,26 @@ export class LedgerPanel {
   private vehicleCard(i: number) {
     const c = this.c;
     const sv = c.players[i];
-    const def = vehicleDef(sv.tier);
-    const st = effectiveStats(sv.tier, sv.mods);
-    const missing = 1 - sv.hpFrac;
-    const repairCost: Cost = { scrap: Math.max(missing > 0.01 ? 1 : 0, Math.ceil(missing * (10 + 10 * sv.tier))) };
-    const upg = checkTierUp(c.stocks, sv.tier, c.chassis, !!this.hub?.features.includes('garage'));
-    const up = VEHICLES.tiers[sv.tier];
+    const b = c.buildOf(i);
+    const def = defOf(b);
+    const st = statsOf(b);
+    const cost = serviceCost(b);
+    const service = needsService(b);
+    const tierIdx = VEHICLES.tiers.findIndex((t) => t.id === b.chassis);
+    const upg = tierIdx >= 0 ? checkTierUp(c.stocks, tierIdx + 1, c.chassis, !!this.hub?.features.includes('garage')) : null;
+    const up = tierIdx >= 0 ? VEHICLES.tiers[tierIdx + 1] : undefined;
     const lines: string[] = [];
     lines.push(
-      `<h4><span class="pcolor" style="background:${PLAYER_CSS[i]}"></span>${escapeHtml(sv.name.toUpperCase())} · ${escapeHtml(def.name)}</h4>`,
-      `<div class="sub2">HP ${Math.round(sv.hpFrac * def.hp)}/${def.hp} · ARMOR ${Math.round(st.armor * 100)}% · TANK ${st.tank.toFixed(0)} FU · TOP ${Math.round(def.topSpeedKmh * st.topSpeedMult)} km/h · W ${def.width} m</div>`,
+      `<h4><span class="pcolor" style="background:${PLAYER_CSS[i]}"></span>${escapeHtml(sv.name.toUpperCase())} · ${escapeHtml(buildName(b))}</h4>`,
+      `<div class="sub2">HP ${Math.round(b.hp * maxHpOf(b))}/${Math.round(maxHpOf(b))} · ARMOR ${Math.round(st.armor * 100)}% · TANK ${st.tank.toFixed(0)} FU · TOP ${Math.round(def.topSpeedKmh * st.topSpeedMult)} km/h · W ${def.width} m</div>`,
     );
     const btns: string[] = [];
-    btns.push(this.btn(`rep${i}`, `Repair <span class="cost">${missing > 0.01 ? costText(repairCost) : 'OK'}</span>`, () => this.repair(i, repairCost), missing > 0.01 && canAfford(c.stocks, repairCost)));
-    if (up) {
+    btns.push(this.btn(`rep${i}`, `Service <span class="cost">${service ? costText(cost) : 'OK'}</span>`, () => this.service(i, cost), service && canAfford(c.stocks, cost)));
+    if (up && upg) {
       btns.push(
         this.btn(
           `tier${i}`,
-          up.beta ? `Tier ${up.tier}: ${escapeHtml(up.name)} (Beta)` : `Rebuild as Tier ${up.tier} <span class="cost">${costText(upg.cost)}${up.upgrade && VEHICLES.tiers[sv.tier - 1].upgrade.chassis ? ' + chassis' : ''}</span>`,
+          up.beta ? `Tier ${up.tier}: ${escapeHtml(up.name)} (Beta)` : `Rebuild as Tier ${up.tier} <span class="cost">${costText(upg.cost)}</span>`,
           () => this.tierUp(i),
           upg.ok,
           upg.reason ?? '',
@@ -167,20 +209,9 @@ export class LedgerPanel {
       );
     }
     lines.push(`<div class="btns">${btns.join('')}</div>`);
-    if (!upg.ok && upg.reason && up && !up.beta) lines.push(`<div class="mutedtxt">${escapeHtml(upg.reason)}</div>`);
-    // Module slots
-    const mods = MODULE_SLOTS.map((slot) => {
-      const lvl = sv.mods[slot];
-      const cost = moduleCost(lvl);
-      return this.btn(
-        `mod${i}-${slot}`,
-        `${VEHICLES.modules.labels[slot].split(' ')[0]}<br>Mk${lvl}${cost ? `<br><span class="cost">${costText(cost)}</span>` : ''}`,
-        () => this.upgradeModule(i, slot),
-        !!cost && canAfford(c.stocks, cost),
-        VEHICLES.modules.labels[slot],
-      );
-    });
-    lines.push(`<div class="mods">${mods.join('')}</div>`);
+    if (upg && !upg.ok && upg.reason && up && !up.beta) lines.push(`<div class="mutedtxt">${escapeHtml(upg.reason)}</div>`);
+    const fitted = (Object.keys(b.fit) as (keyof typeof b.fit)[]).map((k) => `${PARTS.labels[k]}: ${b.fit[k]!.id}`);
+    lines.push(`<div class="mutedtxt">${fitted.length ? fitted.length + ' parts fitted' : 'Stock vehicle'}</div>`);
     return `<div class="card p${i + 1}">${lines.join('')}</div>`;
   }
 
@@ -244,7 +275,7 @@ export class LedgerPanel {
     const next = this.nextLegs;
     const mk = (i: number) => `<span class="vote p${i + 1}" style="opacity:${this.ready[i] ? 1 : 0.35};padding:2px 8px">${escapeHtml(this.c.players[i].name.toUpperCase())} ${this.ready[i] ? 'READY' : '…'}</span>`;
     if (!next.length) return '';
-    return `${mk(0)}${mk(1)}${this.btn('go', 'Roll out', (p) => this.toggleReady(p), true)}`;
+    return `${mk(0)}${this.c.solo ? '' : mk(1)}${this.btn('go', 'Roll out', (p) => this.toggleReady(p), true)}`;
   }
 
   // ------------------------------------------------------------------ actions
@@ -263,36 +294,27 @@ export class LedgerPanel {
     this.warn(msg);
   }
 
-  private repair(i: number, cost: Cost) {
-    const sv = this.c.players[i];
-    if (!this.buyCost(cost)) return this.deny('Not enough Scrap');
-    sv.hpFrac = 1;
+  private service(i: number, cost: Cost) {
+    const b = this.c.buildOf(i);
+    if (!this.buyCost(cost)) return this.deny('Not enough stock');
+    serviceBuild(b);
     this.camp.refreshVehicles();
-    this.ok(`${sv.name}'s ride is patched up.`);
+    this.ok(`${this.c.players[i].name}'s ride is serviced.`);
   }
 
   private tierUp(i: number) {
     const c = this.c;
-    const sv = c.players[i];
-    const chk = checkTierUp(c.stocks, sv.tier, c.chassis, !!this.hub?.features.includes('garage'));
+    const b = c.buildOf(i);
+    const tierIdx = VEHICLES.tiers.findIndex((t) => t.id === b.chassis);
+    const chk = checkTierUp(c.stocks, tierIdx + 1, c.chassis, !!this.hub?.features.includes('garage'));
     if (!chk.ok) return this.deny(chk.reason ?? 'Cannot upgrade');
     spend(c.stocks, chk.cost);
-    if (VEHICLES.tiers[sv.tier - 1].upgrade.chassis) c.chassis -= VEHICLES.tiers[sv.tier - 1].upgrade.chassis;
-    sv.tier = (sv.tier + 1) as 1 | 2 | 3;
-    sv.hpFrac = 1;
-    sv.alive = true;
+    if (VEHICLES.tiers[tierIdx].upgrade.chassis) c.chassis -= VEHICLES.tiers[tierIdx].upgrade.chassis;
+    const spill = rebuildOnto(b, VEHICLES.tiers[tierIdx + 1].id);
+    for (const it of spill) c.addPart(it);
+    c.players[i].alive = true;
     this.camp.refreshVehicles();
-    this.ok(`${sv.name} drives away in a ${vehicleDef(sv.tier).name}.`);
-  }
-
-  private upgradeModule(i: number, slot: ModuleSlot) {
-    const sv = this.c.players[i];
-    const cost = moduleCost(sv.mods[slot]);
-    if (!cost) return;
-    if (!this.buyCost(cost)) return this.deny('Not enough stock');
-    sv.mods[slot]++;
-    this.camp.refreshVehicles();
-    this.ok(`${VEHICLES.modules.labels[slot]} → Mk${sv.mods[slot]}`);
+    this.ok(`${c.players[i].name} drives away in a ${VEHICLES.tiers[tierIdx + 1].name}.`);
   }
 
   private craft(id: string) {
@@ -318,8 +340,9 @@ export class LedgerPanel {
   private toggleReady(p: number) {
     this.ready[p] = !this.ready[p];
     this.game.audio.play('click');
-    if (this.ready[0] && this.ready[1]) {
+    if (this.ready[0] && (this.c.solo || this.ready[1])) {
       const id = this.nextLegs[this.chosen];
+      this.setPreview(false);
       // Tanks are filled from the reserve as the convoy rolls out.
       this.depart(id);
       return;

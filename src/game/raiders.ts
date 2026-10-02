@@ -340,7 +340,7 @@ export class Infantry {
     this.z = z;
     this.hp = def.hp;
     this.speed = def.speed;
-    this.human = new Humanoid({ jacket: C.raiderRed, trim: 0x151515, helmet: kind === 'sniper' ? 0x39422f : 0x111111, pants: 0x4a3a2c });
+    this.human = new Humanoid({ jacket: C.raiderRed, trim: 0x151515, helmet: kind === 'sniper' ? 0x39422f : 0x111111, pants: 0x4a3a2c, mask: true });
     this.human.setWeapon(kind === 'sniper' ? 'rifle' : kind === 'saboteur' ? 'jerrycan' : 'pistol');
     ctx.root.add(this.human.root);
     this.y = ctx.groundAt(x, z);

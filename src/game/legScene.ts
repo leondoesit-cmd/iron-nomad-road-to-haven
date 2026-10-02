@@ -1,25 +1,42 @@
 import * as THREE from 'three';
-import { ENEMIES, VEHICLES, t, type LegDef } from '../data';
+import { ENEMIES, VEHICLES, boatDef, partDef, t, type LegDef } from '../data';
 import { ChunkSource, type ChunkData } from '../world/chunkgen';
-import { CHUNK, heightAt, roadX, surfaceAt, type Surface } from '../world/terrain';
+import { CHUNK, groundHeight, heightAt, roadX, surfaceAt, waterAt as terrainWater, type Surface } from '../world/terrain';
 import type { Aabb, PickupSpawn, ScavContainer, ScavZone } from '../world/layout';
 import { chunkKey } from '../world/layout';
-import { ChunkView, makeChunkMaterials, type ChunkMaterials } from '../render/chunkview';
+import { ChunkView, disposeChunkMaterials, makeChunkMaterials, type ChunkMaterials } from '../render/chunkview';
 import { makeBeam, makePickup } from '../render/props';
+import { Landscape } from '../render/landscape';
 import { clamp, smoothstep } from '../core/math';
 import { Scene, type CompassPin, type SceneServices } from './scene';
-import type { Vehicle } from './vehicle';
+import { QUALITY } from '../render/renderer';
+import { Vehicle } from './vehicle';
 import type { Player } from './player';
 import { DUSK_BELL_AT, DayClock } from '../sim/dayclock';
 import { Rng } from '../core/rng';
 import { disposeTree } from '../render/dispose';
+import { PLAYER_PAINT, newBuild } from '../sim/garage';
+import { RARITY_NAMES, newPart, partName } from '../sim/parts';
+import { carriedName, planStow, type Carried, type Loose } from '../sim/carry';
+import { lakeCurrent } from '../world/lakes';
+import type { DelveSite } from '../world/delveSites';
+import { newDelveRecord, type DelveRecord, type PlayerCarry } from './delveScene';
 
 interface PickupEntity {
   spawn: PickupSpawn;
   group: THREE.Group;
   baseY: number;
   phase: number;
+  /** Set for parts, fuel cans and oil cans: things carried by hand rather than banked on touch. */
+  loose?: Carried;
+  /** Seconds before the full-trunk note may show again. */
+  noteT?: number;
 }
+
+const partMk = (id: string) => partDef(id).mk;
+
+/** How many set-down items may lie about at once before the oldest is tidied away. */
+const MAX_DROPPED = 24;
 
 interface AmbushState {
   spec: LegAmbush;
@@ -51,8 +68,8 @@ export class LegScene extends Scene {
   mode = 'leg' as const;
   src: ChunkSource;
   mats: ChunkMaterials;
-  wallMat: THREE.MeshLambertMaterial;
   chunks = new Map<number, ChunkView>();
+  landscape: Landscape;
   pickups = new Map<string, PickupEntity>();
   takenPickups = new Set<string>();
   spawnedChunks = new Set<number>();
@@ -78,6 +95,8 @@ export class LegScene extends Scene {
   private fuelTip = false;
   private repairTip = false;
   private loadQueueT = 0;
+  /** When the last car or parts tip was shown, so they never talk over each other. */
+  private carTipAt = -99;
   private legRng: Rng;
   distanceTravelled = 0;
   private lastLead = 0;
@@ -94,16 +113,47 @@ export class LegScene extends Scene {
     this.src = new ChunkSource(leg);
     this.terrain = this.src.layout.terrain;
     this.legRng = new Rng(leg.seed + this.campaign.day * 17);
-    this.mats = makeChunkMaterials(leg.biome);
-    this.wallMat = this.mats.walls;
+    this.mats = makeChunkMaterials(leg.biome, leg.theme);
+    this.landscape = new Landscape(this.terrain, this.src.layout);
+    this.obs.ground = (x, z) => heightAt(this.terrain!, x, z);
+    // Doorways of every building, so the dead can find their way in and out.
+    this.zombies.buildings = this.src.layout.rural.map((b) => {
+      const doors: { x: number; z: number; nx: number; nz: number }[] = [];
+      for (const w of b.plan.walls) {
+        if (w.level !== 0) continue;
+        for (const op of w.ops) {
+          if (op.kind === 'window') continue;
+          const mid = (op.a + op.b) / 2;
+          doors.push(w.axis === 'z' ? { x: w.c, z: mid, nx: 1, nz: 0 } : { x: mid, z: w.c, nx: 0, nz: 1 });
+        }
+      }
+      return { x0: b.plan.x0 - 1, x1: b.plan.x1 + 1, z0: b.plan.z0 - 1, z1: b.plan.z1 + 1, doors };
+    });
+    this.root.add(this.landscape.group);
+    // Cut a building away for each viewer standing inside it (roof and upper floors), per view.
+    this.R.onBeforeView[1] = (i, cam) => {
+      const p = this.players[i];
+      const v = p?.vehicle;
+      const focus = p ? (v && p.state !== 'foot' ? { x: v.position.x, y: v.position.y, z: v.position.z } : { x: p.pos.x, y: p.pos.y, z: p.pos.z }) : null;
+      this.landscape.updateView(focus, cam.position.x, cam.position.z);
+    };
+    this.wildlife.canStand = (x, z) => !this.src.layout.blockedAt(x, z, 1.2);
     this.zombies.onObstacleHit = (a, dmg, z) => {
       if (a.kind !== 'barricade' || a.breakable !== 'flimsy') return;
       a.hp -= dmg;
       if (a.hp <= 0 && z.kind === 'brute') this.breakBarricade(a, 'smash');
     };
+    this.loose = {
+      nearest: (x, z, r, prefer) => this.looseNearest(x, z, r, prefer),
+      take: (id) => this.looseTake(id),
+      drop: (x, z, c) => this.looseDrop(x, z, c),
+    };
     this.src.layout.ambushes.forEach((spec) => this.ambushes.push({ spec, state: 'idle', tries: 0, waiting: [], t: 0 }));
     this.src.layout.zones.forEach((zone) => this.zones.push({ zone, noise: 0, horde: 0, fired: false }));
     this.buildMines();
+    this.registerDelves();
+    this.spawnBoats();
+    for (const car of this.src.layout.cars) this.cars.add(car);
     // Preload the start so the world exists before anyone drives.
     const st = this.src.layout.start;
     this.loadAround([{ x: st.x, z: st.z }], 1, 99);
@@ -122,7 +172,120 @@ export class LegScene extends Scene {
   }
 
   groundAt(x: number, z: number): number {
-    return heightAt(this.terrain!, x, z);
+    return groundHeight(this.terrain!, x, z);
+  }
+
+  interiorAt(x: number, z: number, y: number) {
+    for (const b of this.landscape.buildings) {
+      const p = b.plan;
+      if (b.contains(x, z, 0.1) && y > p.floorY - 1.5 && y < p.floorY + p.levels * p.levelH + 0.5) return true;
+    }
+    return false;
+  }
+
+  waterAt(x: number, z: number) {
+    const w = terrainWater(this.terrain!, x, z);
+    return w ? { level: w.level, depth: w.depth, flow: lakeCurrent(w.lake, x, z) } : null;
+  }
+
+  // ------------------------------------------------------------------ ways underground
+
+  /** What each delve of this leg remembers: opened chests, dead guards, the key. */
+  delveRecords = new Map<string, DelveRecord>();
+  private delveNote = 0;
+
+  delveRecord(id: string) {
+    let r = this.delveRecords.get(id);
+    if (!r) this.delveRecords.set(id, (r = newDelveRecord()));
+    return r;
+  }
+
+  /** Boats tied up at each lake's pier: a skiff at the tip, and an airboat further in when there is room. */
+  private spawnBoats() {
+    for (const l of this.terrain!.lakes) {
+      l.dock?.boats.forEach((m, i) => {
+        const def = boatDef(i === 0 ? 'skiff' : 'airboat');
+        const bp = def.physics.boat!;
+        const v = new Vehicle(this, { def, x: m.x, z: m.z, yaw: m.yaw, y: l.level + def.physics.halfExtents[1] - bp.draft + 0.1, faction: 'convoy', kind: 'boat', color: def.id === 'skiff' ? 0x3a6a78 : 0xb8962a });
+        v.fuel = v.tankMax * (0.55 + 0.25 * ((l.seed + i) % 3) / 2);
+        this.vehicles.push(v);
+      });
+    }
+  }
+
+  private registerDelves() {
+    for (const d of this.src.layout.delves) {
+      this.interact.add({
+        id: `delve:${d.id}`,
+        x: d.x,
+        z: d.z,
+        r: 3.6,
+        prompt: `Hold to go down into ${d.name}`,
+        dur: 1.0,
+        priority: 2,
+        enabled: (p) => p.state === 'foot',
+        onTick: (p) => this.delveReady(p, d),
+        run: () => {
+          this.pendingResult = false;
+          this.onResult({ type: 'delveEnter', site: d });
+        },
+      });
+    }
+  }
+
+  /** Both of you go down together: the partner has to be on foot and close. */
+  private delveReady(p: Player, d: DelveSite): boolean {
+    const o = this.players[1 - p.index];
+    if (!o || (o.state === 'foot' && Math.hypot(o.pos.x - d.x, o.pos.z - d.z) < 45)) return true;
+    if (this.time - this.delveNote > 3) {
+      this.delveNote = this.time;
+      p.note('Wait for your partner: you go down together, on foot', 'warn');
+    }
+    return false;
+  }
+
+  /** While a delve has the screen, a share of the day still passes up here. */
+  advanceOffscreen(dt: number) {
+    this.clock.tick(dt);
+  }
+
+  /** Back on the surface at the way in. */
+  returnFromDelve(site: DelveSite, carry: PlayerCarry[], reason: 'climb' | 'lift' | 'rescue') {
+    this.resume();
+    const fx = Math.sin(site.yaw);
+    const fz = Math.cos(site.yaw);
+    this.players.forEach((p, i) => {
+      const side = i === 0 ? -1.4 : 1.4;
+      const x = site.x + fx * 3.2 - fz * side;
+      const z = site.z + fz * 3.2 + fx * side;
+      p.vehicle = null;
+      p.action = null;
+      p.state = 'foot';
+      p.placeAt(x, z, site.yaw);
+      const c = carry[i];
+      if (c) {
+        p.hp = Math.max(c.hp, reason === 'rescue' ? p.maxHp * 0.35 : 1);
+        p.mag = c.mag;
+        p.equip = c.equip;
+        p.utility = c.utility;
+      }
+      p.invuln = 1.5;
+    });
+    if (reason === 'rescue') {
+      const fee = Math.min(15, this.campaign.stocks.scrap);
+      this.campaign.stocks.scrap -= fee;
+      this.radio(`You were dragged out, half dead. Somebody paid a toll (-${fee} Scrap).`);
+    } else this.radio('Daylight. It never looked so good.');
+    this.cam0();
+  }
+
+  private cam0() {
+    for (const p of this.players) p.cam.snap();
+  }
+
+  /** True once the chunk under a point has its physics ground, so a car can be dropped there. */
+  colliderReady(x: number, z: number): boolean {
+    return this.chunks.has(chunkKey(Math.floor(x / CHUNK), Math.floor(z / CHUNK)));
   }
 
   surfaceAt(x: number, z: number) {
@@ -163,24 +326,16 @@ export class LegScene extends Scene {
     const data0 = this.src.get(cx, cz);
     // Barricades already broken stay broken.
     const data: ChunkData = this.brokenAabbs.size ? { ...data0, aabbs: data0.aabbs.filter((a) => !this.brokenAabbs.has(a.id)) } : data0;
-    const view = new ChunkView(data, this.terrain!, this.mats, this.P);
+    const view = new ChunkView(data, this.terrain!, this.mats, this.P, { scatter: QUALITY[this.R.quality].scatter });
     this.root.add(view.group);
     view.group.updateMatrixWorld(true);
     this.chunks.set(key, view);
-    for (const a of data.aabbs) this.obs.add(a);
+    this.landscape.setLoaded(cx, cz, true);
+    for (const a of data.aabbs) if (!a.physOnly) this.obs.add(a);
     // Pickups
     for (const p of data.pickups) {
       if (this.takenPickups.has(p.id) || this.pickups.has(p.id)) continue;
-      const m = makePickup(p.kind);
-      m.group.position.set(p.x, p.y, p.z);
-      if (p.kind === 'fragment' || p.kind === 'chassis') {
-        const col = p.kind === 'fragment' ? 0x3ad0ff : 0x3aa0ff;
-        m.group.add(makeBeam(col, 22));
-      } else if (p.amount >= 14 && p.kind !== 'fuel') {
-        m.group.add(makeBeam(0xffe9a0, 9));
-      } else if (p.kind === 'fuel') m.group.add(makeBeam(0xff6a3a, 7));
-      this.root.add(m.group);
-      this.pickups.set(p.id, { spawn: p, group: m.group, baseY: p.y, phase: Math.random() * 6.28 });
+      this.spawnPickup(p);
     }
     // Zombies spawn the first time a chunk loads.
     if (!this.spawnedChunks.has(key)) {
@@ -215,6 +370,7 @@ export class LegScene extends Scene {
     }
     view.dispose();
     this.chunks.delete(key);
+    this.landscape.setLoaded(view.data.cx, view.data.cz, false);
   }
 
   private stream(dt: number) {
@@ -251,12 +407,12 @@ export class LegScene extends Scene {
   // ------------------------------------------------------------------ scavenging
 
   private addContainer(zone: ScavZone, c: ScavContainer) {
-    const depthName = ['front shelves', 'back shelves', 'the deep stock'][c.depth];
+    const depthName = c.label ?? ['front shelves', 'back shelves', 'the deep stock'][c.depth];
     const glint = new THREE.Mesh(
       new THREE.OctahedronGeometry(0.22),
       new THREE.MeshBasicMaterial({ color: c.depth === 0 ? 0xffd48a : c.depth === 1 ? 0xffb347 : 0xff8a3a }),
     );
-    glint.position.set(c.x, this.groundAt(c.x, c.z) + 2.4, c.z);
+    glint.position.set(c.x, c.y ?? this.groundAt(c.x, c.z) + 2.4, c.z);
     this.root.add(glint);
     this.activeContainers.set(c.id, { glint, c });
     const dur = [1.6, 2.6, 4.0][c.depth];
@@ -360,7 +516,7 @@ export class LegScene extends Scene {
     const ms = this.src.layout.mines;
     if (!ms.length) return;
     const geo = new THREE.CylinderGeometry(0.42, 0.5, 0.12, 10);
-    const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, metalness: 0.4 });
     this.mineMesh = new THREE.InstancedMesh(geo, mat, ms.length);
     this.mineMesh.frustumCulled = false;
     const m = new THREE.Matrix4();
@@ -480,17 +636,92 @@ export class LegScene extends Scene {
 
   // ------------------------------------------------------------------ pickups
 
+  /** Build the floating model for a pickup and register it. Parts, fuel and oil are carried by hand. */
+  private spawnPickup(p: PickupSpawn) {
+    const m = makePickup(p.kind === 'part' ? `part${p.amount}` : p.kind);
+    m.group.position.set(p.x, p.y, p.z);
+    if (p.kind === 'part') {
+      // Good parts show from a distance, in their rarity colour.
+      if (p.amount >= 2) m.group.add(makeBeam(p.amount >= 3 ? 0xffb454 : 0x7ddc7a, p.amount >= 3 ? 14 : 8));
+    } else if (p.kind === 'fragment' || p.kind === 'chassis') {
+      const col = p.kind === 'fragment' ? 0x3ad0ff : 0x3aa0ff;
+      m.group.add(makeBeam(col, 22));
+    } else if (p.amount >= 14 && p.kind !== 'fuel' && p.kind !== 'oil') {
+      m.group.add(makeBeam(0xffe9a0, 9));
+    } else if (p.kind === 'fuel') m.group.add(makeBeam(0xff6a3a, 7));
+    else if (p.kind === 'oil') m.group.add(makeBeam(0xe0b030, 6));
+    this.root.add(m.group);
+    let loose: Carried | undefined;
+    if (p.kind === 'part' && p.part) loose = { kind: 'part', item: newPart(p.part.id, p.part.cond) };
+    else if (p.kind === 'fuel') loose = { kind: 'fuel', amount: p.amount };
+    else if (p.kind === 'oil') loose = { kind: 'oil', amount: p.amount };
+    this.pickups.set(p.id, { spawn: p, group: m.group, baseY: p.y, phase: Math.random() * 6.28, loose });
+  }
+
+  private removePickup(id: string) {
+    const e = this.pickups.get(id);
+    if (!e) return;
+    disposeTree(e.group);
+    e.group.removeFromParent();
+    this.pickups.delete(id);
+  }
+
+  private dropSeq = 0;
+
+  // The world as players see it for carrying: lift, set down, look about.
+  private looseNearest(x: number, z: number, r: number, prefer?: string): Loose | null {
+    let best: Loose | null = null;
+    let bd = r;
+    for (const [id, e] of this.pickups) {
+      if (!e.loose) continue;
+      // Two things at nearly the same distance must not trade places while a lift is in progress.
+      const d = Math.hypot(e.spawn.x - x, e.spawn.z - z) - (id === prefer ? 0.3 : 0);
+      if (d < bd) {
+        bd = d;
+        best = { id, carried: e.loose, x: e.spawn.x, y: e.spawn.y, z: e.spawn.z };
+      }
+    }
+    return best;
+  }
+
+  private looseTake(id: string): Carried | null {
+    const e = this.pickups.get(id);
+    if (!e?.loose) return null;
+    const c = e.loose;
+    this.takenPickups.add(id);
+    this.removePickup(id);
+    return c;
+  }
+
+  private looseDrop(x: number, z: number, c: Carried) {
+    const id = `drop${this.dropSeq++}`;
+    const y = this.groundAt(x, z);
+    const kind = c.kind === 'part' ? 'part' : c.kind;
+    const amount = c.kind === 'part' ? (c.item.id ? partMk(c.item.id) : 1) : c.amount;
+    const spawn: PickupSpawn = { id, kind, amount, x, y, z, part: c.kind === 'part' ? { id: c.item.id, cond: c.item.cond } : undefined };
+    this.spawnPickup(spawn);
+    // Keep the very item that was dropped, so its wear survives being put down.
+    const e = this.pickups.get(id);
+    if (e) e.loose = c;
+    // Tidy the oldest set-down item once too many lie about.
+    const dropped = [...this.pickups.keys()].filter((k) => k.startsWith('drop'));
+    while (dropped.length > MAX_DROPPED) this.removePickup(dropped.shift()!);
+  }
+
   private updatePickups(dt: number) {
     const time = this.time;
     for (const e of this.pickups.values()) {
       e.group.position.y = e.baseY + 0.2 + Math.sin(time * 2 + e.phase) * 0.08;
       e.group.rotation.y += dt * 1.4;
+      if (e.noteT) e.noteT = Math.max(0, e.noteT - dt);
     }
     for (const [id, e] of this.pickups) {
       let taker: Player | null = null;
       for (const p of this.players) {
         if (!p.alive) continue;
         const v = p.vehicle;
+        // Parts, fuel and oil are lifted by hand on foot; only a vehicle sweeps them up as it passes.
+        if (e.loose && !v) continue;
         const px = v ? v.position.x : p.pos.x;
         const pz = v ? v.position.z : p.pos.z;
         const r = v ? v.def.width / 2 + 2.1 : 1.9;
@@ -501,12 +732,36 @@ export class LegScene extends Scene {
         }
       }
       if (!taker) continue;
-      this.collect(e.spawn, taker);
+      if (e.loose && e.spawn.kind !== 'fuel') {
+        if (!this.stowSwept(e, taker)) continue;
+      } else this.collect(e.spawn, taker);
       this.takenPickups.add(id);
-      disposeTree(e.group);
-      e.group.removeFromParent();
-      this.pickups.delete(id);
+      this.removePickup(id);
     }
+  }
+
+  /** A vehicle drives over a part or oil can: it goes in the trunk if there is room, else stays where it lies. */
+  private stowSwept(e: PickupEntity, by: Player): boolean {
+    const c = e.loose!;
+    const camp = this.campaign;
+    const plan = planStow(c, { parts: camp.inventoryRoom, oil: 4 - camp.items.oil });
+    if (!plan.ok) {
+      if (!e.noteT) {
+        by.note(`${plan.label}: ${carriedName(c)} left behind`, 'warn');
+        e.noteT = 6;
+      }
+      return false;
+    }
+    this.audio.play('pickup', e.spawn.x, e.spawn.z, 0.8);
+    this.fx.spark(e.spawn.x, e.spawn.y + 0.6, e.spawn.z, 4, 3);
+    if (c.kind === 'part') {
+      camp.stowPart(c.item);
+      by.note(`+ ${partName(c.item)} (${RARITY_NAMES[partMk(c.item.id)]})`, 'good');
+    } else if (c.kind === 'oil') {
+      const took = camp.stowOil(c.amount);
+      by.note(`+ oil (${Math.round(took * 200)}% of a can)`, 'good');
+    }
+    return true;
   }
 
   private collect(p: PickupSpawn, by: Player) {
@@ -517,6 +772,8 @@ export class LegScene extends Scene {
       case 'fuel':
         this.addLoot({ fuel: p.amount }, 'fuel');
         if (!this.fuelTip) this.fuelTip = true;
+        break;
+      case 'oil':
         break;
       case 'scrap':
       case 'parts':
@@ -690,6 +947,43 @@ export class LegScene extends Scene {
         this.tip('repair');
       }
     }
+    // Cars and parts: introduce the loop the first time it is in reach, one tip at a time.
+    if (this.time - this.carTipAt > 14) {
+      for (const p of this.players) {
+        if (p.state === 'downed' || p.state === 'dead') continue;
+        const near = (pred: (v: Vehicle) => boolean) => p.nearestVehicle(14, pred);
+        let id: string | null = null;
+        if (!this.shownTips.has('tip-car') && near((v) => v.faction === 'neutral' && !v.wreck)) id = 'car';
+        else if (this.shownTips.has('tip-car') && !this.shownTips.has('tip-salvage') && near((v) => this.cars.canSalvage(v))) id = 'salvage';
+        else if (this.campaign.inventory.length && !this.shownTips.has('tip-parts') && this.shownTips.has('tip-car')) id = 'parts';
+        else if (!this.shownTips.has('tip-haul') && p.state === 'foot' && this.looseNearest(p.pos.x, p.pos.z, 5)) id = 'haul';
+        if (id) {
+          this.shownTips.add(`tip-${id}`);
+          this.carTipAt = this.time;
+          this.tip(id);
+          break;
+        }
+      }
+    }
+    // Lakes, boats and the ways down: each introduced once, when it is close, sharing the car tips' spacing.
+    if (this.time - this.carTipAt > 14) {
+      for (const p of this.players) {
+        if (p.state === 'downed' || p.state === 'dead') continue;
+        const x = p.vehicle?.position.x ?? p.pos.x;
+        const z = p.vehicle?.position.z ?? p.pos.z;
+        let id: string | null = null;
+        if (!this.shownTips.has('tip-boat') && p.vehicle?.def.physics.kind === 'boat') id = 'boat';
+        else if (!this.shownTips.has('tip-swim') && p.swimming) id = 'swim';
+        else if (!this.shownTips.has('tip-lake') && this.terrain!.lakes.some((l) => l.dock && Math.hypot(l.dock.shoreX - x, l.dock.shoreZ - z) < 120)) id = 'lake';
+        else if (!this.shownTips.has('tip-delve') && this.src.layout.delves.some((d) => Math.hypot(d.x - x, d.z - z) < 45)) id = 'delve';
+        if (id) {
+          this.shownTips.add(`tip-${id}`);
+          this.carTipAt = this.time;
+          this.tip(id);
+          break;
+        }
+      }
+    }
     if (this.activeContainers.size && !this.shownTips.has('tip-loot')) {
       for (const p of this.players) {
         for (const c of this.activeContainers.values()) {
@@ -705,20 +999,21 @@ export class LegScene extends Scene {
   // ------------------------------------------------------------------ tether, crew
 
   private updateTether(dt: number) {
-    const [a, b] = this.players;
-    if (!a || !b) return;
+    const [a, b = a] = this.players;
+    if (!a) return;
+    // Solo: b defaults to a, so there is never a gap and nobody trails.
     const pa = a.vehicle ? a.vehicle.position : a.pos;
     const pb = b.vehicle ? b.vehicle.position : b.pos;
     const gap = Math.hypot(pa.x - pb.x, pa.z - pb.z);
     this.gap = gap;
     const leader = pa.z >= pb.z ? a : b;
-    const trailer = leader === a ? b : a;
+    const trailer = a === b ? null : leader === a ? b : a;
     const slip = clamp((gap - 60) / 180, 0, 1);
     const pull = smoothstep(240, 330, gap);
     for (const p of this.players) {
       const v = p.vehicle ?? p.ownVehicle;
       if (!v) continue;
-      if (p === trailer) {
+      if (trailer && p === trailer) {
         // Slipstream: the trailing player gets a speed bonus to catch up.
         v.tetherPower = 1 + 0.28 * slip;
         v.tetherTop = 1 + 0.12 * slip;
@@ -778,10 +1073,10 @@ export class LegScene extends Scene {
   }
 
   private updateFail(dt: number) {
-    const down = this.players.every((p) => p.state === 'downed' || p.state === 'dead');
+    const down = this.everyoneDown;
     this.downBothT = down ? this.downBothT + dt : 0;
     if (this.downBothT > 1.5) {
-      this.onResult({ type: 'fail', reason: 'You both went down.' });
+      this.onResult({ type: 'fail', reason: this.campaign.solo ? 'You bled out on the road.' : 'You both went down.' });
       this.downBothT = -999;
       return;
     }
@@ -795,9 +1090,11 @@ export class LegScene extends Scene {
         this.stuckNoVehicleT.set(p.index, 0);
         if (this.campaign.stocks.scrap >= 20) {
           this.campaign.stocks.scrap -= 20;
-          const v = this.spawnVehicle({ tier: 1, x: p.pos.x + 2.5, z: p.pos.z + 1.5, yaw: p.yaw, ownerIndex: p.index, hpFrac: 0.7, fuelFrac: 0.5 });
+          const spare = newBuild('moped', { paint: PLAYER_PAINT[p.index], seed: 91 + p.index + this.campaign.day, hp: 0.7, fuel: 0.5 });
+          this.campaign.adopt(spare);
+          this.campaign.players[p.index].vehicle = spare.uid;
+          const v = this.spawnVehicle({ build: spare, x: p.pos.x + 2.5, z: p.pos.z + 1.5, yaw: p.yaw, ownerIndex: p.index });
           p.ownVehicle = v;
-          this.campaign.players[p.index].tier = 1;
           this.campaign.players[p.index].alive = true;
           p.note('The convoy cobbled together a spare moped (-20 Scrap)', 'warn');
         } else if (this.players.every((q) => !q.vehicle && (!q.ownVehicle || q.ownVehicle.wreck) && this.campaign.stocks.scrap < 20)) {
@@ -824,6 +1121,7 @@ export class LegScene extends Scene {
     this.updateMines(dt);
     this.updateRamming();
     this.updateZones(dt);
+    this.wildlife.ambient(dt, this.leg.biome, this.leg.theme ?? 'dust', this.leg.index);
     this.updateAmbushes(dt);
     this.updateEncounters();
     this.updateTips();
@@ -872,6 +1170,15 @@ export class LegScene extends Scene {
       e.glint.rotation.y += dt * 2.4;
       e.glint.position.y += Math.sin(this.time * 3 + e.c.x) * 0.002;
     }
+    // Ground cover only exists near a player: hide it on chunks too far away for anyone to see it.
+    const pts = this.players.map((p) => (p.vehicle ? p.vehicle.position : p.pos));
+    for (const view of this.chunks.values()) {
+      const cx = (view.data.cx + 0.5) * CHUNK;
+      const cz = (view.data.cz + 0.5) * CHUNK;
+      let d = Infinity;
+      for (const p of pts) d = Math.min(d, Math.hypot(p.x - cx, p.z - cz));
+      view.setDetailDistance(Math.max(0, d - CHUNK * 0.71));
+    }
     void alpha;
   }
 
@@ -898,11 +1205,16 @@ export class LegScene extends Scene {
     pins.push({ x: L.end.x, z: L.end.z, kind: 'end', label: 'CAMP' });
     for (const e of L.encounters) if (!this.doneEncounters.has(e.id)) pins.push({ x: e.x, z: e.z, kind: 'encounter', label: '!' });
     for (const zs of this.zones) {
-      if (zs.zone.containers.some((c) => !c.taken)) pins.push({ x: zs.zone.x, z: zs.zone.z, kind: 'zone', label: zs.zone.kind.slice(0, 1).toUpperCase() });
+      if (zs.zone.pin !== false && zs.zone.containers.some((c) => !c.taken)) pins.push({ x: zs.zone.x, z: zs.zone.z, kind: 'zone', label: zs.zone.kind.slice(0, 1).toUpperCase() });
     }
     for (const [, e] of this.pickups) {
       if (e.spawn.kind === 'fragment') pins.push({ x: e.spawn.x, z: e.spawn.z, kind: 'fragment', label: 'R' });
       if (e.spawn.kind === 'chassis') pins.push({ x: e.spawn.x, z: e.spawn.z, kind: 'chassis', label: 'C' });
+      if (e.spawn.kind === 'part' && e.spawn.amount >= 2) pins.push({ x: e.spawn.x, z: e.spawn.z, kind: 'part', label: 'PART' });
+    }
+    // Your own vehicles left standing, so an old ride is easy to find again.
+    for (const v of this.vehicles) {
+      if (v.faction === 'convoy' && v.kind === 'player' && !v.wreck && !v.driver && !v.passenger) pins.push({ x: v.position.x, z: v.position.z, kind: 'ride', label: 'RIDE' });
     }
     for (const m of this.terrain!.minefields) {
       const z = (m.z0 + m.z1) / 2;
@@ -910,6 +1222,10 @@ export class LegScene extends Scene {
     }
     for (const v of this.vehicles) if (v.faction === 'raider' && !v.wreck) pins.push({ x: v.position.x, z: v.position.z, kind: 'ambush', label: '' });
     for (const p of this.pings) pins.push({ x: p.x, z: p.z, kind: 'ping', label: '' });
+    // Lakes and ways down only show once you are within a few hundred metres.
+    const nearAny = (x: number, z: number, r: number) => this.players.some((p) => Math.hypot((p.vehicle?.position.x ?? p.pos.x) - x, (p.vehicle?.position.z ?? p.pos.z) - z) < r);
+    for (const l of this.terrain!.lakes) if (l.dock && nearAny(l.dock.shoreX, l.dock.shoreZ, 420)) pins.push({ x: l.dock.shoreX, z: l.dock.shoreZ, kind: 'dock', label: 'DOCK' });
+    for (const d of this.src.layout.delves) if (nearAny(d.x, d.z, 420)) pins.push({ x: d.x, z: d.z, kind: 'delve', label: d.theme === 'cave' ? 'CAVE' : d.theme === 'mine' ? 'MINE' : d.theme === 'bunker' ? 'BUNKER' : 'METRO' });
     return pins;
   }
 
@@ -935,10 +1251,9 @@ export class LegScene extends Scene {
       this.mineMesh.removeFromParent();
     }
     // Materials and textures are made per leg.
-    for (const m of [this.mats.terrain, this.mats.props, this.mats.walls, this.mats.roofs, this.mats.road]) m.dispose();
-    this.mats.facade.map.dispose();
-    this.mats.facade.emissive.dispose();
-    this.mats.road.map?.dispose();
+    disposeChunkMaterials(this.mats);
+    this.R.onBeforeView[1] = () => {};
+    this.landscape.dispose();
     super.dispose();
   }
 }

@@ -24,6 +24,7 @@
   "legs": [
     {
       "id": "L1",
+      "theme": "dust",
       "index": 1,
       "act": 1,
       "name": "The Dust",
@@ -53,6 +54,7 @@
     },
     {
       "id": "L2W",
+      "theme": "salt",
       "index": 2,
       "act": 1,
       "name": "Salt Road",
@@ -105,6 +107,7 @@
     },
     {
       "id": "L3W",
+      "theme": "cinder",
       "index": 3,
       "act": 1,
       "name": "Cinder Flats",

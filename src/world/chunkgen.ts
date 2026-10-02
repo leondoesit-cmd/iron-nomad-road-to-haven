@@ -33,6 +33,8 @@ export interface ChunkData {
   zombies: ZombieSpawn[];
   mines: MineSpawn[];
   zones: ScavZone[];
+  /** City blocks (z ranges between cross streets) overlapping this chunk: where sidewalks run. */
+  blocks: { z0: number; z1: number }[];
 }
 
 const inChunk = (cx: number, cz: number, x: number, z: number) => Math.floor(x / CHUNK) === cx && Math.floor(z / CHUNK) === cz;
@@ -90,6 +92,7 @@ export class ChunkSource {
       zombies: L.zombies.filter((p) => inChunk(cx, cz, p.x, p.z)),
       mines: L.mines.filter((p) => inChunk(cx, cz, p.x, p.z)),
       zones: L.zones.filter((p) => inChunk(cx, cz, p.x, p.z)),
+      blocks: L.slots.filter((s) => s.z1 > cz * CHUNK && s.z0 < (cz + 1) * CHUNK).map((s) => ({ z0: s.z0, z1: s.z1 })),
     };
     this.cache.set(key, c);
     return c;

@@ -124,6 +124,7 @@ export class Projectiles {
       } else {
         for (let k = 0; k < 3; k++) ctx.fx.fire(b.x + (Math.random() - 0.5) * b.r * 1.6, gy + 0.2, b.z + (Math.random() - 0.5) * b.r * 1.6, 1.2);
         ctx.zombies.burnArea(b.x, b.z, b.r, 24, dt, b.owner?.index ?? -1);
+        ctx.wildlife.burnArea(b.x, b.z, b.r, 24, dt, b.owner?.index ?? -1);
         ctx.raiders.burnArea(b.x, b.z, b.r, 18, dt);
         for (const v of ctx.vehicles) {
           if (v.faction === 'raider' && Math.hypot(v.position.x - b.x, v.position.z - b.z) < b.r + 1.5) v.takeHit(10 * dt, b.x, b.z, { incendiary: true, silent: true });

@@ -1,0 +1,41 @@
+{
+  "rules": {
+    "activeRadius": 150,
+    "spawnMin": 75,
+    "spawnMax": 135,
+    "despawnRadius": 210,
+    "maxAlive": 28,
+    "spawnEvery": 3,
+    "corpseSeconds": 30
+  },
+  "species": {
+    "hare": {
+      "name": "Dust hare", "temper": "prey", "hp": 8, "armor": 0, "walk": 0.8, "run": 10, "radius": 0.18, "size": 0.85,
+      "cap": 8, "sight": 22, "meat": 1, "group": [1, 3], "legs": 1, "biomes": ["wasteland"], "themes": ["dust", "salt", "cinder"], "weight": 5
+    },
+    "deer": {
+      "name": "Scrub antelope", "temper": "prey", "hp": 42, "armor": 0, "walk": 1.2, "run": 13, "radius": 0.4, "size": 1.0,
+      "cap": 9, "sight": 45, "meat": 4, "group": [3, 6], "legs": 1, "biomes": ["wasteland"], "themes": ["dust", "salt"], "weight": 3
+    },
+    "vulture": {
+      "name": "Carrion vulture", "temper": "bird", "hp": 14, "armor": 0, "walk": 6, "run": 11, "radius": 0.35, "size": 1.0,
+      "cap": 6, "sight": 30, "meat": 0, "group": [2, 4], "legs": 1, "biomes": ["wasteland", "city"], "themes": ["dust", "salt", "cinder"], "weight": 3, "altitude": 15
+    },
+    "dog": {
+      "name": "Feral dog", "temper": "pack", "hp": 32, "armor": 0, "walk": 1.4, "run": 8.2, "radius": 0.32, "size": 1.0,
+      "cap": 5, "sight": 34, "damage": 4.5, "meat": 0, "group": [3, 5], "legs": 1, "biomes": ["wasteland", "city"], "themes": ["dust", "salt", "cinder"], "weight": 2
+    },
+    "wolf": {
+      "name": "Cinder wolf", "temper": "pack", "hp": 58, "armor": 0.05, "walk": 1.5, "run": 9.4, "radius": 0.36, "size": 1.15,
+      "cap": 4, "sight": 46, "damage": 8, "meat": 1, "group": [2, 4], "legs": 2, "biomes": ["wasteland"], "themes": ["salt", "cinder"], "weight": 2
+    },
+    "boar": {
+      "name": "Tusker hog", "temper": "charger", "hp": 95, "armor": 0.1, "walk": 1.1, "run": 9.5, "radius": 0.5, "size": 1.0,
+      "cap": 4, "sight": 16, "damage": 14, "vehicleDamage": 12, "meat": 5, "group": [1, 3], "legs": 1, "biomes": ["wasteland"], "themes": ["dust", "salt", "cinder"], "weight": 2
+    },
+    "bear": {
+      "name": "Ash bear", "temper": "brute", "hp": 330, "armor": 0.35, "walk": 1.3, "run": 7.0, "radius": 0.75, "size": 1.0,
+      "cap": 1, "sight": 20, "damage": 24, "vehicleDamage": 22, "meat": 10, "group": [1, 1], "legs": 2, "biomes": ["wasteland"], "themes": ["cinder", "salt"], "weight": 1
+    }
+  }
+}

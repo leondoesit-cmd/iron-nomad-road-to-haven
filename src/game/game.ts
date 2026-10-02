@@ -11,8 +11,14 @@ import { initPhysics, FIXED_STEP } from '../physics/physics';
 import { LEGS, legById, t, validateData } from '../data';
 import { Overlays } from '../ui/overlays';
 import { CampScene } from './campScene';
+import { DelveScene, carryOf } from './delveScene';
+import type { DelveSite } from '../world/delveSites';
 import { applyEncounterEffects } from './encounterFx';
 import { saveCampaign, loadCampaign } from '../save/save';
+import { PLAYER_PAINT, newBuild } from '../sim/garage';
+import { Workbench } from '../ui/garage';
+import type { Player } from './player';
+import type { Vehicle } from './vehicle';
 
 export type Phase =
   | 'boot'
@@ -56,6 +62,9 @@ export class Game {
   private startLock = 0;
   /** True while the title screen is showing a live autopilot convoy behind the menu. */
   private attract = false;
+  private aimHint!: HTMLElement;
+  /** The title screen's choice, and the mode of the run in progress: one player, full screen. */
+  solo = false;
 
   constructor() {
     this.debug = new URLSearchParams(location.search).has('debug');
@@ -67,6 +76,17 @@ export class Game {
     this.hud.setLayout(this.R.layout);
     this.overlays = new Overlays(this);
     this.input.onEscape = () => this.togglePause(-1);
+    // Mouse aim: click the canvas to capture the pointer. Esc (or alt-tab) releases it, which pauses.
+    this.input.attachMouse(canvas);
+    this.input.onChange = () => this.saveSettings();
+    this.input.canCapture = () => !this.paused && !this.attract && (this.phase === 'leg' || this.phase === 'camp');
+    this.input.onPointerLost = () => {
+      if (!this.paused && !this.attract && (this.phase === 'leg' || this.phase === 'camp')) this.setPause(true, this.input.mouseSeat());
+    };
+    this.aimHint = document.createElement('div');
+    this.aimHint.id = 'aimhint';
+    this.aimHint.textContent = 'Click to capture the mouse · move to aim · left click fire · right click aim';
+    document.getElementById('ui')!.appendChild(this.aimHint);
     this.input.onDisconnect = (p) => {
       this.hud.disconnected[p] = true;
       if (this.phase === 'leg' || this.phase === 'camp') this.setPause(true, p);
@@ -112,12 +132,16 @@ export class Game {
     try {
       const raw = localStorage.getItem('ironnomad.settings');
       if (!raw) return;
-      const s = JSON.parse(raw) as { quality?: QualityPreset; ui?: number; layout?: 'horizontal' | 'vertical'; vol?: number; music?: number };
+      const s = JSON.parse(raw) as { quality?: QualityPreset; ui?: number; layout?: 'horizontal' | 'vertical'; vol?: number; music?: number; mouse?: number; solo?: boolean; input?: unknown };
+      if (s.solo) this.setSolo(true);
       if (s.quality && QUALITY[s.quality]) this.R.setQuality(s.quality);
       if (s.ui) this.hud.setScale(s.ui);
       if (s.layout) this.R.setLayout(s.layout);
       if (s.vol !== undefined) this.audio.setVolume(s.vol);
       if (s.music !== undefined) this.audio.setMusicVolume(s.music);
+      if (s.mouse) this.input.settings.mouseSens = s.mouse;
+      // Control settings: bindings, sensitivities, view. Saved since the first version only kept the mouse speed.
+      this.input.importSettings(s.input);
     } catch {
       /* private mode or corrupt settings */
     }
@@ -127,7 +151,7 @@ export class Game {
     try {
       localStorage.setItem(
         'ironnomad.settings',
-        JSON.stringify({ quality: this.R.quality, ui: this.hud.uiScale, layout: this.R.layout, vol: this.audio.volume, music: this.audio.musicVolume }),
+        JSON.stringify({ quality: this.R.quality, ui: this.hud.uiScale, layout: this.R.layout, vol: this.audio.volume, music: this.audio.musicVolume, mouse: this.input.settings.mouseSens, solo: this.solo, input: this.input.exportSettings() }),
       );
     } catch {
       /* ignore */
@@ -150,8 +174,20 @@ export class Game {
 
   // ------------------------------------------------------------------ flow
 
+  /** One seat and a full-screen view, or two seats and a split screen. Applies to the next run, and to the title demo. */
+  setSolo(solo: boolean) {
+    this.solo = solo;
+    const n = solo ? 1 : 2;
+    this.input.setSeats(n);
+    this.R.setSeats(n);
+    this.hud.setSeats(n);
+    this.focus.seats = n;
+    this.overlays.pauseFocus.seats = n;
+  }
+
   newCampaign() {
-    this.campaign = new Campaign([this.overlays.callsign(0), this.overlays.callsign(1)]);
+    this.setSolo(this.solo);
+    this.campaign = new Campaign([this.overlays.callsign(0), this.overlays.callsign(1)], this.solo);
     this.campaign.seed = (Math.random() * 1e6) | 0;
   }
 
@@ -164,14 +200,23 @@ export class Game {
   continueGame() {
     const c = loadCampaign();
     if (!c) return this.startNewGame();
+    this.setSolo(c.solo);
     this.input.autoJoinKeyboard();
     this.campaign = c;
     // Resume at the Ledger that was saved at dawn.
     this.beginLedger();
   }
 
+  /** The leg that is waiting, hidden, while a delve has the screen. */
+  private delveParent: LegScene | null = null;
+
   disposeScene() {
     this.attract = false;
+    if (this.delveParent) {
+      const parent = this.delveParent;
+      this.delveParent = null;
+      parent.dispose();
+    }
     if (this.scene) {
       this.scene.dispose();
       this.scene = null;
@@ -183,8 +228,10 @@ export class Game {
     this.overlays.hideAll();
     this.campaign.legId = legId;
     const leg = legById(legId);
+    this.R.resize();
     const sc = new LegScene(this.services(), leg);
     sc.onResult = (r) => this.onSceneResult(r);
+    sc.openWorkbench = (p, v) => this.openWorkbench(p, v);
     this.scene = sc;
     this.phase = 'leg';
     this.paused = false;
@@ -195,8 +242,41 @@ export class Game {
     this.startLock = 0.5;
   }
 
+  /** Go down: the leg is put to sleep (kept whole, unseen and unticked) and a delve takes its place. */
+  beginDelve(site: DelveSite) {
+    const parent = this.scene;
+    if (!(parent instanceof LegScene) || this.delveParent) return;
+    const carry = parent.players.map(carryOf);
+    parent.suspend();
+    this.delveParent = parent;
+    const sc = new DelveScene(this.services(), parent.leg, site, parent.delveRecord(site.id), carry);
+    sc.parentTick = (dt) => parent.advanceOffscreen(dt);
+    sc.onResult = (r) => this.onSceneResult(r);
+    this.scene = sc;
+    this.paused = false;
+    this.startLock = 0.5;
+  }
+
+  /** Come back up to the leg, at the way in. */
+  endDelve(reason: 'climb' | 'lift' | 'rescue') {
+    const sc = this.scene;
+    const parent = this.delveParent;
+    if (!(sc instanceof DelveScene) || !parent) return;
+    const carry = sc.carry();
+    const site = sc.site;
+    sc.dispose();
+    this.delveParent = null;
+    this.scene = parent;
+    parent.returnFromDelve(site, carry, reason);
+    this.audio.setMusic('travel');
+    this.paused = false;
+    this.startLock = 0.5;
+  }
+
   private onSceneResult(r: SceneResult) {
     if (r.type === 'fail') return this.fail(r.reason);
+    if (r.type === 'delveEnter') return this.beginDelve(r.site);
+    if (r.type === 'delveExit') return this.endDelve(r.reason);
     if (r.type === 'encounter' && this.scene instanceof LegScene) {
       this.phase = 'vote';
       this.scene.paused = true;
@@ -228,6 +308,7 @@ export class Game {
     this.campaign.hotCamp = hot;
     const camp = new CampScene(this.services(), leg, siteId, hot);
     camp.onResult = (r) => this.onSceneResult(r);
+    camp.openWorkbench = (p, v) => this.openWorkbench(p, v);
     this.scene = camp;
     this.phase = 'camp';
     this.paused = false;
@@ -235,13 +316,29 @@ export class Game {
     this.hud.showBanner('CAMP', camp.siteName, 5);
   }
 
+  private workbench: Workbench | null = null;
+
+  /** Open the field workbench for one of the convoy's vehicles. The game stands still while it is open. */
+  openWorkbench(p: Player, v: Vehicle) {
+    const sc = this.scene;
+    if (!sc || this.workbench || (this.phase !== 'leg' && this.phase !== 'camp')) return;
+    const back = this.phase;
+    sc.paused = true;
+    this.phase = 'vote';
+    const wb = new Workbench(this, this.overlays.root, () => {
+      this.workbench = null;
+      sc.paused = false;
+      this.phase = back;
+      this.startLock = 0.4;
+    });
+    this.workbench = wb;
+    wb.open(v, p.index);
+  }
+
   private snapshotVehicles() {
     const sc = this.scene;
     if (!sc) return;
-    for (let i = 0; i < 2; i++) {
-      const own = sc.players[i]?.ownVehicle;
-      if (own && !own.wreck) this.campaign.players[i].hpFrac = own.hpFrac;
-    }
+    sc.commitFleet();
   }
 
   private afterCamp() {
@@ -293,12 +390,20 @@ export class Game {
     this.startAttract();
   }
 
-  /** A looping demo behind the title: two autopilot convoys on the first road. */
+  /** Rebuild the title demo, for when the number of seats changed under it. */
+  restartAttract() {
+    if (this.phase === 'title') this.startAttract();
+  }
+
+  /** A looping demo behind the title: one autopilot convoy per seat on the first road. */
   private startAttract() {
     this.disposeScene();
-    const c = new Campaign(['Ash', 'Rook']);
-    c.players[0].tier = 3;
-    c.players[1].tier = 2;
+    this.setSolo(this.solo);
+    const c = new Campaign(['Ash', 'Rook'], this.solo);
+    for (const [i, chassis] of (this.solo ? [[0, 'buggy']] : [[0, 'buggy'], [1, 'quad']]) as readonly (readonly [0 | 1, string])[]) {
+      const b = newBuild(chassis, { paint: PLAYER_PAINT[i], seed: 40 + i });
+      c.addVehicle(b, i);
+    }
     c.seed = (Math.random() * 1e6) | 0;
     this.campaign = c;
     const svc = this.services();
@@ -308,7 +413,7 @@ export class Game {
     sc.onResult = () => {};
     sc.pendingResult = true; // no encounters or camp decisions in the demo
     sc.players[0].autopilot = { speed: 17 };
-    sc.players[1].autopilot = { speed: 15 };
+    if (sc.players[1]) sc.players[1].autopilot = { speed: 15 };
     this.scene = sc;
     this.attract = true;
   }
@@ -358,6 +463,10 @@ export class Game {
       this.input.pollJoin();
       this.overlays.tickTitle(step);
     }
+    // The pointer is only captured during live play; menus and overlays need the cursor back.
+    const live = !this.paused && !this.attract && (this.phase === 'leg' || this.phase === 'camp');
+    if (this.input.mouseLocked && !live) this.input.release();
+    this.aimHint.style.display = live && this.input.mouseSeat() >= 0 && !this.input.mouseLocked ? 'block' : 'none';
     if (this.paused) {
       this.overlays.tickPause(step);
       return;
@@ -436,6 +545,31 @@ export class Game {
     if (sc instanceof LegScene) sc.addPing(pt.x, pt.z, p);
   }
 
+  /** Tooling: a fixed full-screen camera for screenshots. */
+  private photo: { pos: [number, number, number]; look: [number, number, number]; fov: number } | null = null;
+
+  /** Frame one full-screen shot from a fixed camera; pass null to return to the split screen. */
+  setPhoto(p: { pos: [number, number, number]; look: [number, number, number]; fov?: number } | null) {
+    this.photo = p ? { ...p, fov: p.fov ?? 50 } : null;
+    if (!p) this.R.resize();
+  }
+
+  private applyPhoto() {
+    const ph = this.photo;
+    if (!ph) return;
+    const R = this.R;
+    const v = R.views[0];
+    v.rect = { x: 0, y: 0, w: R.width, h: R.height };
+    v.camera.aspect = R.width / R.height;
+    v.camera.fov = ph.fov;
+    v.camera.updateProjectionMatrix();
+    v.camera.position.set(...ph.pos);
+    v.camera.lookAt(...ph.look);
+    v.camera.updateMatrixWorld();
+    v.focus.set(...ph.look);
+    R.views[1].active = false;
+  }
+
   /**
    * Run the simulation for `seconds` of game time without waiting on requestAnimationFrame, then draw one frame.
    * Used by tests and tooling (and anywhere the tab is hidden and the browser throttles rAF).
@@ -446,13 +580,15 @@ export class Game {
       this.fixed(FIXED_STEP);
       if (drawEvery && i % drawEvery === 0) this.render(0, FIXED_STEP * drawEvery);
     }
-    this.render(0, FIXED_STEP);
+    // Cameras damp per rendered frame, so give the final frame enough time to settle on the new pose.
+    this.render(0, drawEvery ? FIXED_STEP : Math.min(Math.max(seconds, FIXED_STEP), 0.5));
   }
 
   private render(alpha: number, dt: number) {
     const sc = this.scene;
     if (sc && (this.phase === 'leg' || this.phase === 'camp' || this.phase === 'ledger' || this.phase === 'vote' || this.phase === 'report' || (this.phase === 'title' && this.attract))) {
       sc.renderFrame(this.paused ? 0 : alpha, dt);
+      this.applyPhoto();
       if (!this.attract) sc.updateAudio(dt);
       this.R.adapt(this.frameMs);
       // Particles scale with the viewport.
@@ -460,7 +596,7 @@ export class Game {
         const v = this.R.views[i];
         this.R.onBeforeView[0] = (idx, cam) => {
           const rect = this.R.views[idx].rect;
-          sc.fx.setViewScale(rect.h * this.R.gl.getPixelRatio(), cam.fov);
+          sc.fx.setViewScale(rect.h * this.R.renderPixelRatio(), cam.fov);
         };
         void v;
       }

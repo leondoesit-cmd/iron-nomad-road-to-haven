@@ -1,5 +1,6 @@
 import { VEHICLES } from '../data';
 import { clamp, wrapAngle } from '../core/math';
+import { oilPower } from './oil';
 
 export type Facing = 'front' | 'side' | 'rear';
 
@@ -22,6 +23,8 @@ export interface Components {
   tank: number; // 0..1
   mount: number; // weapon mount 0..1
   plates: number; // armor plates 0..1 (loses protection as it falls)
+  /** Engine oil in the sump, 0..1. */
+  oil: number;
 }
 
 export interface VehicleHealth {
@@ -32,6 +35,8 @@ export interface VehicleHealth {
   leaking: boolean;
   burning: boolean;
   destroyed: boolean;
+  /** Extra armour from bolt-on parts, by the side the hit lands on (bull bar, side plates). */
+  armorBonus?: { front: number; side: number; rear: number };
 }
 
 export function newHealth(maxHp: number, armor: number, wheels: number): VehicleHealth {
@@ -39,7 +44,7 @@ export function newHealth(maxHp: number, armor: number, wheels: number): Vehicle
     hp: maxHp,
     maxHp,
     armor,
-    comp: { engine: 1, tires: new Array(wheels).fill(1), tank: 1, mount: 1, plates: 1 },
+    comp: { engine: 1, tires: new Array(wheels).fill(1), tank: 1, mount: 1, plates: 1, oil: 1 },
     leaking: false,
     burning: false,
     destroyed: false,
@@ -71,7 +76,8 @@ export function applyHit(h: VehicleHealth, raw: number, o: HitOpts): { dealt: nu
   const events: DamageEvent[] = [];
   if (h.destroyed) return { dealt: 0, events };
   const plating = 0.4 + 0.6 * h.comp.plates; // damaged plates protect less
-  const red = armorReduction(h.armor * plating, o.facing) * (o.ram ? 0.6 : 1);
+  const bonus = h.armorBonus?.[o.facing] ?? 0;
+  const red = armorReduction(h.armor * plating + bonus, o.facing) * (o.ram ? 0.6 : 1);
   const dealt = raw * (1 - red);
   h.hp = Math.max(0, h.hp - dealt);
   h.comp.plates = Math.max(0, h.comp.plates - dealt / (h.maxHp * 1.6));
@@ -85,6 +91,8 @@ export function applyHit(h: VehicleHealth, raw: number, o: HitOpts): { dealt: nu
       events.push({ kind: 'tire', wheel: o.wheel });
     } else if (r < 0.3) {
       h.comp.engine = Math.max(0, h.comp.engine - 0.35);
+      // A holed block bleeds its oil.
+      h.comp.oil = Math.max(0, h.comp.oil - 0.2);
       events.push({ kind: 'engine' });
     } else if (r < 0.6) {
       const w = Math.floor(o.roll() * h.comp.tires.length);
@@ -117,7 +125,7 @@ export function performance(h: VehicleHealth): { power: number; grip: number } {
   const flats = h.comp.tires.filter((t) => t <= 0).length;
   const frac = h.comp.tires.length ? flats / h.comp.tires.length : 0;
   return {
-    power: (0.45 + 0.55 * h.comp.engine) * (1 - 0.35 * frac),
+    power: (0.45 + 0.55 * h.comp.engine) * (1 - 0.35 * frac) * oilPower(h.comp.oil ?? 1),
     grip: 1 - 0.55 * frac,
   };
 }

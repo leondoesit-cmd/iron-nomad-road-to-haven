@@ -3,16 +3,19 @@ import { Campaign } from '../game/campaign';
 const KEY = 'ironnomad.save.v1';
 const DB = 'ironnomad';
 const STORE = 'saves';
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 
 type Blob = ReturnType<Campaign['serialize']> & { v: number };
 
 let mem: Blob | null = null;
 
-/** Versioned JSON; migrations hook in here when the schema changes. */
+/**
+ * Versioned JSON; migrations hook in here when the schema changes.
+ * v1 stored a tier and module levels per player; Campaign.deserialize turns those into garage builds.
+ */
 function migrate(d: Blob): Blob | null {
   if (!d || typeof d !== 'object') return null;
-  if (d.v === SAVE_VERSION) return d;
+  if (d.v === SAVE_VERSION || d.v === 1) return d;
   return null; // unknown versions are ignored rather than half-loaded
 }
 
@@ -77,10 +80,15 @@ export function hasSave() {
   return !!mem;
 }
 
+/** Whether the stored campaign is a solo run, without building the whole campaign. */
+export function savedSolo(): boolean {
+  return !!mem?.solo;
+}
+
 export function loadCampaign(): Campaign | null {
   if (!mem) return null;
   try {
-    return Campaign.deserialize(mem);
+    return Campaign.deserialize(mem as Parameters<typeof Campaign.deserialize>[0]);
   } catch {
     return null;
   }

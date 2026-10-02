@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { LEGS } from '../src/data';
 import { ChunkSource } from '../src/world/chunkgen';
-import { CHUNK, CELLS, heightAt, roadX, makeTerrainDef, chunkHeights, surfaceAt } from '../src/world/terrain';
+import { CHUNK, CELLS, heightAt, roadX, makeTerrainDef, chunkHeights, surfaceAt, corridorHalf } from '../src/world/terrain';
 
 describe.each(LEGS.legs.map((l) => [l.id, l] as const))('leg %s layout', (_id, leg) => {
   const src = new ChunkSource(leg);
@@ -65,8 +65,8 @@ describe('terrain', () => {
   });
   it('cliffs bound the corridor', () => {
     const z = 600;
-    expect(heightAt(def, roadX(def, z) + 190, z)).toBeGreaterThan(20);
-    expect(heightAt(def, roadX(def, z) - 190, z)).toBeGreaterThan(20);
+    expect(heightAt(def, roadX(def, z) + corridorHalf(def, z) + 25, z)).toBeGreaterThan(20);
+    expect(heightAt(def, roadX(def, z) - corridorHalf(def, z) - 25, z)).toBeGreaterThan(20);
   });
   it('road surface is asphalt, the sides are not', () => {
     expect(surfaceAt(def, roadX(def, 500), 500)).toBe('asphalt');
@@ -108,5 +108,125 @@ describe('city passages', () => {
       if (p.width >= 2.6) expect(covered(cx)).toBe(true);
       else expect(covered(cx)).toBe(false);
     }
+  });
+});
+
+describe('wasteland places', () => {
+  const wasteland = LEGS.legs.filter((l) => l.biome === 'wasteland');
+  it.each(wasteland.map((l) => [l.id, l] as const))('%s: roadside places fill the leg and leave the road clear', (_id, leg) => {
+    const src = new ChunkSource(leg);
+    const L = src.layout;
+    const def = L.terrain;
+    // A place every few hundred metres, not one per leg.
+    expect(def.sites.length).toBeGreaterThanOrEqual(5);
+    expect(L.rural.length).toBeGreaterThanOrEqual(8);
+    expect(new Set(def.sites.map((s) => s.kind)).size).toBeGreaterThanOrEqual(4);
+    // Nothing solid sits on the carriageway or its shoulders.
+    for (const a of L.aabbs) {
+      if (a.kind !== 'building' && a.kind !== 'tower' && a.kind !== 'pillar' && a.kind !== 'crate' && a.kind !== 'partition' && a.kind !== 'furniture') continue;
+      for (let z = a.minZ; z <= a.maxZ + 2; z += 2) {
+        const rx = roadX(def, Math.min(z, a.maxZ));
+        const gap = Math.max(a.minX - rx, rx - a.maxX);
+        expect(gap).toBeGreaterThan(def.roadHalf + 2);
+      }
+    }
+    // Buildings stand on level ground.
+    for (const b of L.rural) {
+      const a = b.aabb;
+      const hs = [[a.minX, a.minZ], [a.maxX, a.minZ], [a.minX, a.maxZ], [a.maxX, a.maxZ]].map(([x, z]) => heightAt(def, x, z));
+      expect(Math.max(...hs) - Math.min(...hs)).toBeLessThan(2.6);
+    }
+  });
+  it('places are inside the corridor and clear of authored set pieces', () => {
+    for (const leg of wasteland) {
+      const def = makeTerrainDef(leg);
+      for (const s of def.sites) {
+        expect(Math.abs(s.x - roadX(def, s.z))).toBeLessThan(corridorHalf(def, s.z));
+        for (const r of def.ramps) expect(s.z < r.z0 - 40 || s.z > r.z0 + 200).toBe(true);
+        for (const c of def.canyons) expect(s.z < c.z0 - 40 || s.z > c.z1 + 40).toBe(true);
+        for (const m of def.minefields) expect(s.z < m.z0 - 40 || s.z > m.z1 + 40).toBe(true);
+      }
+    }
+  });
+  it('the road still climbs gently with basins, dunes and buttes around it', () => {
+    for (const leg of wasteland) {
+      const def = makeTerrainDef(leg);
+      for (let z = 0; z < leg.length; z += 4) {
+        if (def.ramps.some((r) => z > r.z0 - 8 && z < r.z0 + r.len + r.gap + r.plateauLen + 40)) continue;
+        const dz = (heightAt(def, roadX(def, z + 4), z + 4) - heightAt(def, roadX(def, z), z)) / 4;
+        expect(Math.abs(dz)).toBeLessThan(Math.tan((12 * Math.PI) / 180));
+      }
+    }
+  });
+});
+
+describe('wasteland interiors', () => {
+  const wasteland = LEGS.legs.filter((l) => l.biome === 'wasteland');
+  it.each(wasteland.map((l) => [l.id, l] as const))('%s: buildings have levelled floors, walls with doorways and things to search', (_id, leg) => {
+    const L = new ChunkSource(leg).layout;
+    const def = L.terrain;
+    expect(L.rural.length).toBeGreaterThanOrEqual(8);
+    for (const b of L.rural) {
+      const p = b.plan;
+      // The ground inside the walls is the floor.
+      for (const [x, z] of [[p.x0 + 1, p.z0 + 1], [p.x1 - 1, p.z1 - 1], [(p.x0 + p.x1) / 2, (p.z0 + p.z1) / 2]]) expect(heightAt(def, x, z)).toBeCloseTo(p.floorY, 2);
+      expect(p.rooms.length).toBeGreaterThan(0);
+      expect(p.walls.some((w) => w.ext && w.ops.some((o) => o.kind === 'door' || o.kind === 'gate'))).toBe(true);
+    }
+    // Every building interior can hold loot, and the containers are spread over several rooms and buildings.
+    expect(L.zones.length).toBeGreaterThanOrEqual(5);
+    const containers = L.zones.flatMap((z) => z.containers);
+    expect(containers.length).toBeGreaterThanOrEqual(15);
+    for (const c of containers) expect(Object.keys(c.loot).length).toBeGreaterThan(0);
+    expect(new Set(containers.map((c) => c.label)).size).toBeGreaterThanOrEqual(4);
+  });
+  it('the dead wait inside some of them', () => {
+    let inside = 0;
+    for (const leg of wasteland) {
+      const L = new ChunkSource(leg).layout;
+      for (const z of L.zombies) {
+        if (L.rural.some((b) => z.x > b.plan.x0 + 0.3 && z.x < b.plan.x1 - 0.3 && z.z > b.plan.z0 + 0.3 && z.z < b.plan.z1 - 0.3)) inside++;
+      }
+    }
+    expect(inside).toBeGreaterThan(5);
+  });
+});
+
+describe.each(LEGS.legs.map((l) => [l.id, l] as const))('leg %s cars', (_id, leg) => {
+  const L = new ChunkSource(leg).layout;
+
+  it('has cars, each with a unique id and a seed', () => {
+    expect(L.cars.length).toBeGreaterThan(leg.biome === 'city' ? 20 : 8);
+    expect(new Set(L.cars.map((c) => c.id)).size).toBe(L.cars.length);
+  });
+
+  it('places them identically every time', () => {
+    const again = new ChunkSource(leg).layout.cars;
+    expect(JSON.stringify(again)).toBe(JSON.stringify(L.cars));
+  });
+
+  it('keeps them off the ground-level roadbed in the wasteland and on the boulevard in the city', () => {
+    for (const c of L.cars) {
+      expect(Number.isFinite(c.y)).toBe(true);
+      if (leg.biome === 'wasteland') {
+        // Roadside wrecks stand beside the road, never across it.
+        expect(Math.abs(c.x - roadX(L.terrain, c.z))).toBeGreaterThan(4.5);
+        expect(Math.abs(c.y - heightAt(L.terrain, c.x, c.z))).toBeLessThan(0.01);
+      } else {
+        expect(Math.abs(c.x)).toBeLessThan(40);
+      }
+    }
+  });
+
+  it('never drops a zombie or a pickup inside a car', () => {
+    for (const z of L.zombies) for (const c of L.cars) expect(Math.hypot(z.x - c.x, z.z - c.z)).toBeGreaterThan(1.0);
+  });
+
+  it('the cars on a leg are a mix of conditions', async () => {
+    const { rollCar } = await import('../src/sim/cars');
+    const count = { hulk: 0, rough: 0, intact: 0 };
+    for (const c of L.cars) count[rollCar(c.seed, { biome: leg.biome, chassis: c.chassis, status: c.status }).status]++;
+    expect(count.hulk + count.rough + count.intact).toBe(L.cars.length);
+    expect(count.rough + count.intact).toBeGreaterThan(2);
   });
 });

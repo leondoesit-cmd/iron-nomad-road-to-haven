@@ -5,6 +5,9 @@ import structuresJson from './structures.json';
 import legsJson from './legs.json';
 import encountersJson from './encounters.json';
 import stringsJson from './strings.en.json';
+import partsJson from './parts.json';
+import boatsJson from './boats.json';
+import wildlifeJson from './wildlife.json';
 
 export type StockId = 'fuel' | 'rations' | 'scrap' | 'parts' | 'tech' | 'medicine';
 export const STOCK_IDS: StockId[] = ['fuel', 'rations', 'scrap', 'parts', 'tech', 'medicine'];
@@ -13,6 +16,12 @@ export type Cost = Partial<Record<StockId | 'fu', number>>;
 
 export type ModuleSlot = 'engine' | 'armor' | 'wheels' | 'weapon' | 'utility';
 export const MODULE_SLOTS: ModuleSlot[] = ['engine', 'armor', 'wheels', 'weapon', 'utility'];
+
+/** Every place a part can be bolted on. The first five are the performance slots, the last four are mounts. */
+export type PartSlot = 'engine' | 'wheels' | 'armor' | 'weapon' | 'utility' | 'front' | 'roof' | 'rear' | 'side';
+export const PART_SLOTS: PartSlot[] = ['engine', 'wheels', 'armor', 'weapon', 'utility', 'front', 'roof', 'rear', 'side'];
+export const MOUNT_SLOTS: PartSlot[] = ['front', 'roof', 'rear', 'side'];
+export type WeaponMount = 'none' | 'front' | 'bed';
 
 export interface VehiclePhysicsDef {
   mass: number;
@@ -30,6 +39,23 @@ export interface VehiclePhysicsDef {
   wheelsX: number[];
   uprightGain: number;
   lean: boolean;
+  /** 'boat': a hull that floats (see physics/boat.ts). The wheel fields are ignored. */
+  kind?: 'boat';
+  boat?: BoatPhysics;
+}
+
+/** How a hull sits and moves in the water. */
+export interface BoatPhysics {
+  /** Metres of hull under the waterline at rest. */
+  draft: number;
+  /** Linear and quadratic drag along the keel, and the sideways drag that keeps a boat on its line. */
+  forwardDrag: number;
+  quadDrag: number;
+  lateralDrag: number;
+  /** Top turn rate in rad/s. */
+  yawRate: number;
+  /** Driven by a fan above the water: needs no propeller depth. */
+  air: boolean;
 }
 
 export interface VehicleDef {
@@ -51,6 +77,56 @@ export interface VehicleDef {
   camera: { dist: number; height: number };
   physics: VehiclePhysicsDef;
   upgrade: { parts: number; scrap: number; tech: number; chassis: number; needsGarage?: boolean };
+  /** 0..1: how well it copes with sand and mud. Missing means the baseline (0.45). */
+  offroad?: number;
+  /** What a weapon part gives this chassis: a fixed front gun, a bed gun with a gunner seat, or nothing. */
+  weaponMount?: WeaponMount;
+  /** Which slots accept parts. Missing means all of them. */
+  slots?: PartSlot[];
+  /** Where the gunner stands on a bed-gun chassis, in the chassis frame. Missing means the buggy's bed. */
+  gunner?: [number, number, number];
+  /** Seat positions in the chassis frame (x left, y up, z forward). */
+  seat?: { driver: [number, number, number]; passenger: [number, number, number] };
+  /** Can turn up abandoned on the road. */
+  found?: boolean;
+  lootWeight?: number;
+}
+
+export interface PartStats {
+  force?: number;
+  top?: number;
+  burn?: number;
+  sig?: number;
+  grip?: number;
+  travel?: number;
+  offroad?: number;
+  armor?: number;
+  armorF?: number;
+  armorS?: number;
+  armorR?: number;
+  hp?: number;
+  dmg?: number;
+  rate?: number;
+  tank?: number;
+  cargo?: number;
+  plow?: number;
+  ram?: number;
+  light?: number;
+  spare?: number;
+}
+
+export interface PartDef {
+  id: string;
+  slot: PartSlot;
+  /** Quality, 1 to 3. Also the rarity. */
+  mk: 1 | 2 | 3;
+  name: string;
+  blurb: string;
+  stats: PartStats;
+  /** Cost to fabricate at the Ledger. */
+  cost: Cost;
+  /** Relative chance to turn up in salvage. */
+  weight: number;
 }
 
 export type ZombieKind = 'walker' | 'runner' | 'screamer' | 'bloater' | 'brute' | 'stalker';
@@ -134,6 +210,8 @@ export interface LegDef {
   baseThreat: number;
   dayLength: number;
   tutorial?: boolean;
+  /** Ground palette for wasteland legs. */
+  theme?: 'dust' | 'salt' | 'cinder';
   endHub?: string;
   campSites: string[];
   sets: SetPiece[];
@@ -172,14 +250,80 @@ export interface EncounterDef {
 export const VEHICLES = vehiclesJson as unknown as {
   armorFacing: { front: number; side: number; rear: number };
   tiers: VehicleDef[];
-  modules: {
-    slots: ModuleSlot[];
-    levels: { level: number; parts: number; scrap: number; tech: number }[];
-    perLevel: Record<ModuleSlot, Record<string, number>>;
-    labels: Record<ModuleSlot, string>;
-  };
+  /** Abandoned-car chassis that can turn up in the world. */
+  cars: VehicleDef[];
   surfaces: Record<string, { grip: number; drag: number }>;
 };
+export const PARTS = partsJson as unknown as {
+  slots: PartSlot[];
+  labels: Record<PartSlot, string>;
+  rarity: Record<string, string>;
+  /** Condition a stock component drops to when its upgrade part is pulled out. */
+  stockCondition: number;
+  parts: PartDef[];
+  paints: { id: string; name: string; c: number }[];
+  stripes: { id: string; name: string }[];
+};
+const PART_BY_ID = new Map(PARTS.parts.map((p) => [p.id, p]));
+export function partDef(id: string): PartDef {
+  const p = PART_BY_ID.get(id);
+  if (!p) throw new Error(`Unknown part ${id}`);
+  return p;
+}
+export function hasPart(id: string) {
+  return PART_BY_ID.has(id);
+}
+
+/** Boats found at the docks. They are not part of the garage: nobody builds or upgrades one. */
+export const BOATS = (boatsJson as unknown as { boats: VehicleDef[] }).boats;
+export function boatDef(id: string): VehicleDef {
+  const d = BOATS.find((b) => b.id === id);
+  if (!d) throw new Error(`Unknown boat ${id}`);
+  return d;
+}
+
+/** Every chassis by id: the five signature tiers plus the abandoned cars. */
+export const CHASSIS: Record<string, VehicleDef> = Object.fromEntries([...VEHICLES.tiers, ...VEHICLES.cars].map((d) => [d.id, d]));
+export function chassisDef(id: string): VehicleDef {
+  const d = CHASSIS[id];
+  if (!d) throw new Error(`Unknown chassis ${id}`);
+  return d;
+}
+export function hasChassis(id: string) {
+  return id in CHASSIS;
+}
+export type AnimalKind = 'hare' | 'deer' | 'vulture' | 'dog' | 'wolf' | 'boar' | 'bear';
+/** prey: bolts from danger. bird: wheels overhead. pack: hunts people on foot. charger: bolts, then rams what upset it. brute: leaves you be until provoked. */
+export type AnimalTemper = 'prey' | 'bird' | 'pack' | 'charger' | 'brute';
+export interface AnimalDef {
+  name: string;
+  temper: AnimalTemper;
+  hp: number;
+  armor: number;
+  walk: number;
+  run: number;
+  radius: number;
+  size: number;
+  sight: number;
+  damage?: number;
+  vehicleDamage?: number;
+  /** Rations dropped when it is killed and a player reaches the carcass. */
+  meat: number;
+  group: [number, number];
+  /** Most of this species alive in the world at once. */
+  cap: number;
+  /** Leg index from which it turns up. */
+  legs: number;
+  biomes: ('wasteland' | 'city')[];
+  themes: ('dust' | 'salt' | 'cinder')[];
+  weight: number;
+  altitude?: number;
+}
+export const WILDLIFE = wildlifeJson as unknown as {
+  rules: { activeRadius: number; spawnMin: number; spawnMax: number; despawnRadius: number; maxAlive: number; spawnEvery: number; corpseSeconds: number };
+  species: Record<AnimalKind, AnimalDef>;
+};
+
 export const ENEMIES = enemiesJson as unknown as {
   zombies: Record<ZombieKind, ZombieDef>;
   zombieRules: {
@@ -274,6 +418,23 @@ export function validateData(): string[] {
     need(v.hp > 0 && v.tank > 0, `vehicle ${v.id}: hp/tank must be positive`);
     need(v.armor >= 0 && v.armor < 1, `vehicle ${v.id}: armor range`);
   });
+  VEHICLES.cars.forEach((v) => {
+    need(!!v.found && !!v.seat, `car ${v.id}: found cars need a seat layout`);
+    need(v.physics.wheelsZ.length * v.physics.wheelsX.length >= v.physics.wheelCount, `car ${v.id}: wheel layout too small for wheelCount`);
+    need(!VEHICLES.tiers.some((t) => t.id === v.id), `car ${v.id}: id clashes with a tier`);
+  });
+  for (const b of BOATS) {
+    need(b.physics.kind === 'boat' && !!b.physics.boat, `boat ${b.id}: needs physics.kind and physics.boat`);
+    need(!CHASSIS[b.id], `boat ${b.id}: id clashes with a chassis`);
+    need(!!b.seat && b.hp > 0 && b.tank > 0, `boat ${b.id}: seats, hp and tank`);
+    need((b.physics.boat?.draft ?? 0) > 0 && (b.physics.boat?.draft ?? 9) < b.physics.halfExtents[1] * 2, `boat ${b.id}: draft must be inside the hull`);
+  }
+  for (const p of PARTS.parts) {
+    need(PARTS.slots.includes(p.slot), `part ${p.id}: unknown slot ${p.slot}`);
+    need(p.mk >= 1 && p.mk <= 3, `part ${p.id}: mk range`);
+    need(p.weight > 0, `part ${p.id}: weight`);
+  }
+  need(new Set(PARTS.parts.map((p) => p.id)).size === PARTS.parts.length, 'parts: duplicate ids');
   for (const leg of LEGS.legs) {
     need(leg.length > 500, `leg ${leg.id}: too short`);
     let last = -1;

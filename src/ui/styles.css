@@ -48,6 +48,13 @@ body {
   right: 0;
   overflow: hidden;
 }
+.half.full {
+  top: 0;
+  bottom: 0;
+}
+.half.off {
+  display: none;
+}
 .half.h-top {
   top: 0;
   height: calc(50% - 2px);
@@ -249,6 +256,15 @@ canvas.compass {
 .bar.fuel.crit .fill {
   background: var(--red);
 }
+.bar.oil .fill {
+  background: #d8a824;
+}
+.bar.oil.low .fill {
+  background: var(--amber);
+}
+.bar.oil.crit .fill {
+  background: var(--red);
+}
 .speed {
   font-family: var(--mono);
   font-size: 1.9em;
@@ -342,6 +358,14 @@ canvas.compass {
 .prompt .btn.x {
   background: #5aa9ff;
 }
+.prompt.alt {
+  margin-top: 3px;
+  padding: 2px 12px;
+  font-size: 0.8em;
+}
+.prompt.alt.off {
+  opacity: 0.5;
+}
 .prompt .hold {
   position: absolute;
   left: 0;
@@ -349,6 +373,31 @@ canvas.compass {
   height: 3px;
   width: 0;
   background: var(--amber);
+}
+.vread {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+.vread:empty {
+  display: none;
+}
+.vread .vcard {
+  font-size: 0.78em;
+  letter-spacing: 0.14em;
+  background: rgba(0, 0, 0, 0.6);
+  border-left: 3px solid var(--amber);
+  padding: 1px 10px;
+}
+.vread .vcard em {
+  font-style: normal;
+  color: var(--amber);
+  margin-left: 8px;
+  font-size: 0.85em;
+}
+.vread .chips {
+  justify-content: center;
 }
 .notes {
   display: flex;
@@ -850,6 +899,10 @@ button:disabled {
   color: #5a4630;
   text-transform: none;
 }
+.card .sub2 .bad {
+  color: #a8321f;
+  font-weight: 700;
+}
 .card .btns {
   display: flex;
   flex-wrap: wrap;
@@ -1084,4 +1137,344 @@ button:disabled {
   height: 12px;
   background: #fff;
   transform: translateX(-2px);
+}
+
+#aimhint {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  display: none;
+  pointer-events: none;
+  font-size: 0.8em;
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  padding: 4px 14px;
+  z-index: 5;
+}
+
+/* ------------------------------------------------------------------ garage */
+.ledger h2 .tabs {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 18px;
+  font-size: 0.5em;
+}
+.tabbtn {
+  font-size: 1em;
+  padding: 2px 14px;
+  letter-spacing: 0.12em;
+}
+.tabbtn.on {
+  background: rgba(38, 28, 16, 0.78) !important;
+  color: #f3e6c8 !important;
+}
+.tabbtn small {
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+.ledger.gmode {
+  inset: 2.5% 22.5%;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto 1fr auto;
+  font-size: 0.78em;
+}
+.ledger.bench {
+  inset: 4% 12%;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto 1fr auto;
+}
+.benchfoot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-top: 2px solid rgba(38, 28, 16, 0.4);
+  padding-top: 6px;
+}
+.gbody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow: hidden;
+}
+.gtop {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 8px;
+}
+.gfoot {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+}
+.gpanel {
+  border: 1px solid rgba(38, 28, 16, 0.35);
+  background: rgba(255, 255, 255, 0.22);
+  padding: 5px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  overflow: hidden;
+}
+.gpanel h3 {
+  margin: 0;
+  display: flex;
+  justify-content: space-between;
+}
+.gpanel h3 small {
+  font-family: var(--mono);
+  font-size: 0.75em;
+  color: #5a4630;
+}
+.gpanel .gh {
+  margin-top: 4px;
+  letter-spacing: 0.1em;
+  border-bottom: 1px dotted rgba(38, 28, 16, 0.3);
+}
+.slotgrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  margin-top: 5px;
+}
+.slotbtn {
+  display: flex !important;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  padding: 2px 6px !important;
+  line-height: 1.15;
+  min-width: 0;
+  overflow: hidden;
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+.slotbtn small {
+  font-size: 0.68em;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #6a5a45;
+}
+.slotbtn b {
+  font-size: 0.86em;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.slotbtn em {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 0.7em;
+}
+.slotbtn em.bad {
+  color: #b3281c;
+}
+.slotbtn em.mid {
+  color: #9a5a10;
+}
+.slotbtn.fitted {
+  background: rgba(125, 220, 122, 0.22);
+}
+.slotbtn.sel {
+  outline: 2px solid #261c10;
+  background: rgba(255, 200, 100, 0.5);
+}
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 4px;
+}
+.swbtn {
+  padding: 1px !important;
+  line-height: 0;
+  min-width: 0;
+}
+.sw {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+}
+.sw.on {
+  outline: 2px solid #261c10;
+  outline-offset: 1px;
+}
+.swatches.small .sw {
+  width: 14px;
+  height: 14px;
+}
+.stripes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 3px;
+}
+.chipbtn {
+  font-size: 0.7em !important;
+  padding: 1px 7px !important;
+  text-transform: none;
+}
+.chipbtn.on {
+  background: rgba(38, 28, 16, 0.78) !important;
+  color: #f3e6c8 !important;
+}
+.partrow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.partrow.now {
+  border-left: 3px solid #261c10;
+  padding-left: 6px;
+}
+.partrow .wide {
+  width: 100%;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  padding: 2px 6px;
+}
+.partrow small {
+  color: #5a4630;
+  font-size: 0.75em;
+}
+.picker {
+  overflow-y: auto;
+}
+.stocklist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+.stockline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85em;
+}
+.stockline small {
+  color: #6a5a45;
+}
+.stockline button {
+  font-size: 0.7em;
+  padding: 0 6px;
+  text-transform: none;
+}
+.yardrow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-bottom: 1px dotted rgba(38, 28, 16, 0.3);
+  padding-bottom: 3px;
+}
+.yardrow small {
+  color: #6a5a45;
+}
+.yardrow .btns {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+}
+.yardrow .btns button {
+  font-size: 0.7em;
+  padding: 1px 7px;
+}
+.pbtn.p1.on {
+  background: var(--p1) !important;
+  color: #1a1209 !important;
+}
+.pbtn.p2.on {
+  background: var(--p2) !important;
+  color: #1a1209 !important;
+}
+.gcard h4 {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ------------------------------------------------------------------ control settings */
+.menu.cmenu {
+  min-width: 760px;
+  width: min(900px, 94%);
+}
+.cmenu .ctabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 4px;
+}
+.cmenu .ctab {
+  padding: 3px 14px;
+  letter-spacing: 0.1em;
+}
+.cmenu .ctab.on {
+  background: var(--amber);
+  color: #1a1209;
+  border-color: var(--amber);
+}
+.cmenu .cnote {
+  font-size: 0.72em;
+  text-transform: none;
+  letter-spacing: 0.01em;
+  color: #c9bd9f;
+  margin: 4px 0 0;
+}
+.cmenu .scroll {
+  max-height: 54vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.cmenu .item {
+  align-items: center;
+}
+.cmenu .aname {
+  display: grid;
+}
+.cmenu .aname small {
+  font-size: 0.78em;
+  text-transform: none;
+  letter-spacing: 0.01em;
+  color: #c9bd9f;
+}
+.cmenu .bindbtn {
+  min-width: 150px;
+  font-family: var(--mono);
+}
+.cmenu .foot {
+  margin-top: 6px;
+}
+.cmenu .cstatus {
+  color: var(--amber);
+  font-size: 0.9em;
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+.capture {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  background: rgba(5, 4, 3, 0.86);
+  font-size: 1.5em;
+  color: var(--amber);
+  pointer-events: auto;
+}
+.capture small {
+  color: #c9bd9f;
+  font-size: 0.6em;
 }

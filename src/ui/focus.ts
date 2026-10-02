@@ -16,6 +16,8 @@ export class FocusUI {
   items: FocusItem[] = [];
   cursor: [number, number] = [0, 0];
   active = false;
+  /** Cursors shown: 1 when playing solo, so no second ring sits on a button nobody controls. */
+  seats: 1 | 2 = 2;
   onCancel: (player: number) => void = () => {};
   /** Extra per-tick hook so panels can read other buttons (e.g. LB/RB tab switching). */
   onTick: ((input: InputManager) => void) | null = null;
@@ -55,7 +57,7 @@ export class FocusUI {
 
   paint() {
     for (const it of this.items) it.el.classList.remove('f0', 'f1');
-    for (let p = 0; p < 2; p++) {
+    for (let p = 0; p < this.seats; p++) {
       if (!this.active) continue;
       const cur = this.items[this.cursor[p]];
       cur?.el.classList.add(`f${p}`);
@@ -100,7 +102,11 @@ export class FocusUI {
         best = i;
       }
     });
-    if (best >= 0) this.cursor[p] = best;
+    if (best >= 0) {
+      this.cursor[p] = best;
+      // Long menus scroll: keep the focused row in view.
+      this.items[best].el.scrollIntoView?.({ block: 'nearest' });
+    }
   }
 
   /** Call every fixed tick while the menu is open. */

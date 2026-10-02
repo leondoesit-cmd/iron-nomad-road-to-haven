@@ -1,4 +1,4 @@
-import { STOCK_IDS, VEHICLES, vehicleDef, type Cost, type ModuleSlot, type StockId, type Stocks } from '../data';
+import { STOCK_IDS, VEHICLES, type Cost, type StockId, type Stocks } from '../data';
 
 export function newStocks(init?: Partial<Stocks>): Stocks {
   return { fuel: 0, rations: 0, scrap: 0, parts: 0, tech: 0, medicine: 0, ...init };
@@ -109,35 +109,6 @@ export function checkTierUp(stocks: Stocks, fromTier: number, chassis: number, a
   if (info.chassis > chassis) return { ok: false, reason: `Needs a salvaged chassis (${chassis}/${info.chassis})`, cost: info.cost };
   if (!canAfford(stocks, info.cost)) return { ok: false, reason: 'Not enough stock', cost: info.cost };
   return { ok: true, cost: info.cost };
-}
-
-export function moduleCost(level: number): Cost | null {
-  const l = VEHICLES.modules.levels[level]; // upgrading from `level` to `level+1`
-  if (!l) return null;
-  const c: Cost = {};
-  if (l.parts) c.parts = l.parts;
-  if (l.scrap) c.scrap = l.scrap;
-  if (l.tech) c.tech = l.tech;
-  return c;
-}
-
-export type ModuleLevels = Record<ModuleSlot, number>;
-export const emptyModules = (): ModuleLevels => ({ engine: 0, armor: 0, wheels: 0, weapon: 0, utility: 0 });
-
-/** Stats a vehicle gets from its tier plus module levels. Pure so it can be tested. */
-export function effectiveStats(tier: number, mods: ModuleLevels) {
-  const d = vehicleDef(tier);
-  const p = VEHICLES.modules.perLevel;
-  return {
-    forceMult: 1 + p.engine.force * mods.engine,
-    topSpeedMult: 1 + p.engine.topSpeed * mods.engine,
-    armor: Math.min(0.9, d.armor + p.armor.armor * mods.armor),
-    gripMult: 1 + p.wheels.grip * mods.wheels,
-    travelMult: 1 + p.wheels.travel * mods.wheels,
-    damageMult: 1 + p.weapon.damage * mods.weapon,
-    tank: d.tank * (1 + p.utility.tank * mods.utility),
-    cargo: d.cargo + p.utility.cargo * mods.utility,
-  };
 }
 
 // ---------------------------------------------------------------- crafting

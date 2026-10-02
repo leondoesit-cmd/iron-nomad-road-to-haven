@@ -1,17 +1,22 @@
 import * as THREE from 'three';
 import { RAPIER, GROUPS, groups, G, type Collider } from '../physics/physics';
 import { ENEMIES, LEGS, MERCS, STRUCTURES, VEHICLES, t, type BuildElementDef, type LegDef, type ZombieKind, type RaiderKind } from '../data';
-import { MeshBuilder } from '../render/builder';
+import { MeshBuilder, S } from '../render/builder';
+import { drum, heavyGun, plate, spareTyre } from '../render/parts';
 import { appendProp } from '../render/props';
-import { C, BIOME_GROUND } from '../render/palette';
+import { kitMaterial } from '../render/materials';
+import { CampArena } from '../render/campArena';
+import { QUALITY } from '../render/renderer';
+import { C } from '../render/palette';
 import { Btn, heldFor, isHeld, wasPressed, type PlayerIntent } from '../input/intents';
 import { campVerdict, nightlyUpkeep, type Merc } from '../sim/loyalty';
 import { canAfford, spend, whole } from '../sim/resources';
+import { modsOf } from '../sim/parts';
 import { convoyPower, pickRaidKind, planRaid } from '../sim/threat';
 import { DayClock, lightAt } from '../sim/dayclock';
 import { clamp, wrapAngle } from '../core/math';
 import { Rng } from '../core/rng';
-import type { Aabb } from '../world/layout';
+import type { Aabb, CarSpawn } from '../world/layout';
 import { newAabbId } from '../world/layout';
 import { Scene, type CompassPin, type SceneServices } from './scene';
 import type { Player } from './player';
@@ -89,7 +94,7 @@ export class CampScene extends Scene {
   private waveBanner = '';
   private openSectors: number[] = [0, 1, 2, 3, 4, 5, 6, 7];
   private spotlightsOn = 0;
-  private groundMesh!: THREE.Mesh;
+  private arena: CampArena | null = null;
   private rng2: Rng;
   private safeNight = false;
   private legRngSeed: number;
@@ -101,6 +106,10 @@ export class CampScene extends Scene {
   private fires: { x: number; z: number }[] = [];
   private nightStartedAt = 0;
   private idleYaw = 0;
+  /** Cars standing in the camp arena: real vehicles you can strip or claim. */
+  private campCars: CarSpawn[] = [];
+  /** True while the Ledger's garage tab is open: cameras frame each vehicle for a narrow strip. */
+  preview = false;
   private ammoCrafted = 0;
   private downBothT = 0;
   private spotCones: THREE.Mesh[] = [];
@@ -130,6 +139,8 @@ export class CampScene extends Scene {
     this.buildArena();
     this.P.step();
     this.spawnConvoyCamp();
+    this.cars.everything = true;
+    for (const c of this.campCars) this.cars.add(c);
     const hub = leg.endHub ? LEGS.hubs[leg.endHub] : null;
     this.safeNight = !!hub?.safeNight && !ledgerOnly;
     this.planRaid();
@@ -176,93 +187,53 @@ export class CampScene extends Scene {
 
   private buildArena() {
     const city = this.biome === 'city';
-    const pal = BIOME_GROUND[this.biome];
-    // Ground
+    // One flat collider for the ground; the visual ground rises into a basin beyond the raid spawn ring.
     this.P.addStaticBox(0, -0.5, 0, 260, 0.5, 260, 0, GROUPS.static);
-    const gg = new THREE.PlaneGeometry(520, 520, 1, 1);
-    gg.rotateX(-Math.PI / 2);
-    const base = city ? pal.asphalt : pal.hardpan;
-    const mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(base[0] ** 2.2, base[1] ** 2.2, base[2] ** 2.2) });
-    this.groundMesh = new THREE.Mesh(gg, mat);
-    this.groundMesh.receiveShadow = true;
-    this.root.add(this.groundMesh);
-    // Scatter detail so the ground reads and the shadow has something to land on.
-    const decor = new MeshBuilder();
     const r = this.rng2;
-    for (let i = 0; i < 90; i++) {
-      const a = r.range(0, Math.PI * 2);
-      const d = r.range(8, 140);
-      const x = Math.cos(a) * d;
-      const z = Math.sin(a) * d;
-      if (city) appendProp(decor, { kind: r.pick(['rubble', 'barrel', 'tires', 'dumpster']), x, y: 0, z, yaw: r.range(0, 6), scale: 1, seed: r.int(0, 99) });
-      else appendProp(decor, { kind: r.pick(['rock', 'rock', 'bones', 'deadTree', 'tires']), x, y: 0, z, yaw: r.range(0, 6), scale: r.range(0.8, 1.8), seed: r.int(0, 99) });
-    }
-    // Outer ring that closes the view.
-    const ring = new MeshBuilder();
-    for (let i = 0; i < 26; i++) {
-      const a = (i / 26) * Math.PI * 2 + r.range(-0.05, 0.05);
-      const d = r.range(74, 96);
-      const x = Math.cos(a) * d;
-      const z = Math.sin(a) * d;
-      if (city) {
-        const w = r.range(16, 26);
-        const h = r.range(14, 46);
-        ring.box(x, h / 2, z, w, h, w, [0x6a6c6a, 0x5a5e5c, 0x777a76][i % 3]);
-      } else {
-        const h = r.range(14, 34);
-        ring.add('ico', x, h * 0.4, z, r.range(22, 36), h, r.range(22, 36), [0x8a5a3a, 0x7a4a30, 0x9b6a44][i % 3], r.range(0, 1), r.range(0, 6), 0);
-      }
-    }
-    const rm = new THREE.Mesh(ring.build(), new THREE.MeshLambertMaterial({ vertexColors: true }));
-    rm.castShadow = false;
-    this.root.add(rm);
+    const arena = new CampArena(this.biome, r.int(0, 99999));
+    this.arena = arena;
+    this.root.add(arena.group);
+    const decor = new MeshBuilder();
     const site = this.siteId;
-    const staticB = new MeshBuilder();
-    const wall = (x: number, z: number, w: number, d: number, h = 1.5, color = C.concrete) => {
+    const wall = (x: number, z: number, w: number, d: number, h = 1.5) => {
       this.box(x, z, w, d, h);
-      staticB.box(x, h / 2, z, w, h, d, color);
+      arena.barrier(x, z, w, d, h);
     };
     if (site === 'gasStation') {
       // Station building and canopy with pre-built walls.
       this.box(-20, 14, 14, 8, 4.4);
-      staticB.box(-20, 2.2, 14, 14, 4.4, 8, 0x8a8a84);
-      staticB.box(-20, 4.6, 14, 15, 0.4, 9, 0x5a4a3a);
-      for (const [px, pz] of [[-6, 6], [6, 6], [-6, -4], [6, -4]]) {
-        staticB.box(px, 2.2, pz, 0.5, 4.4, 0.5, C.metal);
-      }
-      staticB.box(0, 4.5, 1, 18, 0.5, 14, 0x6a6a64);
-      for (const px of [-4, 4]) {
-        this.box(px, 1, 1.1, 1.1, 1.4, 'crate');
-        staticB.box(px, 0.7, 1, 1.1, 1.4, 1.1, C.fuel);
-      }
+      for (const px of [-4, 4]) this.box(px, 1, 1.1, 1.1, 1.4, 'crate');
+      arena.gasStation();
       wall(-14, -16, 14, 1, 1.4);
       wall(14, -16, 14, 1, 1.4);
       wall(26, -4, 1, 16, 1.4);
       wall(-30, -2, 1, 14, 1.4);
-      for (const [x, z] of [[18, 16], [-26, -14]]) appendProp(decor, { kind: 'wreck', x, y: 0, z, yaw: r.range(0, 6), scale: 1, seed: 1 });
+      for (const [x, z] of [[18, 16], [-26, -14]]) this.campCars.push({ id: `camp:car${this.campCars.length}`, x, y: 0, z, yaw: r.range(0, 6), seed: 1 + this.campCars.length * 3 + this.leg.seed });
       this.openSectors = [0, 1, 2, 3, 4, 5, 6, 7];
     } else if (site === 'canyonMouth') {
       // Rock walls east and west, with a choke at the north mouth and a dead end to the south.
       for (const sx of [-1, 1]) {
         this.box(sx * 30, 0, 14, 90, 11, 'rock');
-        staticB.add('ico', sx * 30, 4, 0, 18, 18, 96, [0x8a5a3a, 0x7a4a30][sx > 0 ? 0 : 1], 0, 0, 0);
+        arena.addRise({ x: sx * 30, z: 0, w: 14, d: 90, h: 11 });
       }
       this.box(0, -50, 80, 14, 11, 'rock');
-      staticB.add('ico', 0, 4, -50, 90, 18, 20, 0x7a4a30, 0, 0, 0);
-      this.box(-20, 44, 22, 8, 8, 'rock');
-      this.box(20, 44, 22, 8, 8, 'rock');
-      staticB.add('ico', -20, 3, 44, 26, 12, 12, 0x8a5a3a, 0, 0, 0);
-      staticB.add('ico', 20, 3, 44, 26, 12, 12, 0x9b6a44, 0, 0, 0);
+      arena.addRise({ x: 0, z: -50, w: 80, d: 14, h: 11 });
+      for (const sx of [-1, 1]) {
+        this.box(sx * 20, 44, 22, 8, 8, 'rock');
+        arena.addRise({ x: sx * 20, z: 44, w: 22, d: 8, h: 8 });
+      }
+      // Boulders fallen from the walls.
+      for (let i = 0; i < 16; i++) {
+        const sx = i % 2 ? 1 : -1;
+        arena.boulder(sx * r.range(22.5, 24), r.range(-40, 38), r.range(1.6, 3.4), i, r.range(0, 6));
+      }
       // Open ground: raids come through north, north-east and north-west only.
       this.openSectors = [0, 1, 7];
       this.bounds = { minX: -ARENA + 6, maxX: ARENA - 6, minZ: -ARENA + 4, maxZ: ARENA + 6 };
     } else if (site === 'carPark') {
       for (let ix = -2; ix <= 2; ix++) for (let iz = -2; iz <= 2; iz++) {
         if (ix === 0 && iz === 0) continue;
-        const x = ix * 11;
-        const z = iz * 11;
-        this.box(x, z, 2, 2, 5, 'pillar');
-        staticB.box(x, 2.5, z, 2, 5, 2, C.concrete);
+        this.box(ix * 11, iz * 11, 2, 2, 5, 'pillar');
       }
       // Perimeter wall with three ramps (N, E, S) left open.
       const edge = 30;
@@ -273,7 +244,7 @@ export class CampScene extends Scene {
       wall(-edge, 0, 1.2, 40, 2.2);
       wall(edge, -22, 1.2, 12, 2.2);
       wall(edge, 22, 1.2, 12, 2.2);
-      staticB.box(0, 5.2, 0, 70, 0.6, 70, 0x6c6e6a);
+      arena.carPark();
       this.openSectors = [0, 1, 4, 5, 6, 7, 3];
     } else if (site === 'plaza') {
       const ringR = 32;
@@ -283,32 +254,42 @@ export class CampScene extends Scene {
         if ([0, 2, 4, 6].includes(sec) && k % 2 === 0 && Math.abs(Math.round(a / (Math.PI / 2)) * (Math.PI / 2) - a) < 0.3) continue; // gaps N,E,S,W
         wall(Math.sin(a) * ringR, Math.cos(a) * ringR, 7.5, 1.2, 1.4);
       }
-      for (const [x, z] of [[-10, 12], [12, -10]]) appendProp(decor, { kind: 'wreck', x, y: 0, z, yaw: r.range(0, 6), scale: 1, seed: 2 });
+      arena.plaza();
+      for (const [x, z] of [[-10, 12], [12, -10]]) this.campCars.push({ id: `camp:car${this.campCars.length}`, x, y: 0, z, yaw: r.range(0, 6), seed: 2 + this.campCars.length * 3 + this.leg.seed });
       this.openSectors = [0, 1, 2, 3, 4, 5, 6, 7];
     } else {
-      // flats: open ground, a few rocks to hide behind
+      // Flats: open ground, a few rocks to hide behind.
       for (const [x, z, s] of [[-22, 18, 3], [24, -16, 3.4], [-14, -26, 2.6]]) {
         this.box(x, z, s * 1.6, s * 1.6, 3.4, 'rock');
-        staticB.add('ico', x, 1.2, z, s * 1.9, 3.4, s * 1.9, 0x8a6a4a, 0, 0, 0);
+        arena.boulder(x, z, s * 1.25, Math.round(s * 3), s);
       }
     }
-    const dm = new THREE.Mesh(decor.build(), new THREE.MeshLambertMaterial({ vertexColors: true }));
+    arena.buildGround();
+    // Debris strewn across the camp, clear of anything solid.
+    const solid = (x: number, z: number, rad: number) => {
+      let hit = false;
+      this.obs.near(x, z, rad, (a) => {
+        if (x > a.minX - rad && x < a.maxX + rad && z > a.minZ - rad && z < a.maxZ + rad) hit = true;
+      });
+      return hit || Math.hypot(x, z - 1.5) < 4;
+    };
+    for (let i = 0; i < 70; i++) {
+      const a = r.range(0, Math.PI * 2);
+      const d = r.range(9, 108);
+      const x = Math.cos(a) * d;
+      const z = Math.sin(a) * d;
+      if (solid(x, z, 2)) continue;
+      if (city) appendProp(decor, { kind: r.pick(['rubble', 'barrel', 'tires', 'dumpster']), x, y: 0, z, yaw: r.range(0, 6), scale: 1, seed: r.int(0, 99) });
+      else appendProp(decor, { kind: r.pick(['rock', 'rock', 'bones', 'deadTree', 'tires']), x, y: 0, z, yaw: r.range(0, 6), scale: r.range(0.8, 1.8), seed: r.int(0, 99) });
+    }
+    const dm = new THREE.Mesh(decor.build(), kitMaterial());
     dm.castShadow = true;
     dm.receiveShadow = true;
     this.root.add(dm);
-    const sm = new THREE.Mesh(staticB.build(), new THREE.MeshLambertMaterial({ vertexColors: true }));
-    sm.castShadow = true;
-    sm.receiveShadow = true;
-    this.root.add(sm);
-    // A fire ring and a crate for the hot camp.
-    const cb = new MeshBuilder();
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2;
-      cb.add('ico', Math.cos(a) * 1.0, 0.18, 1.5 + Math.sin(a) * 1.0, 0.5, 0.36, 0.5, C.concreteDark, 0, a, 0);
-    }
-    cb.box(0, 0.12, 1.5, 0.9, 0.2, 0.2, C.woodDark, 0, 0.5, 0);
-    cb.box(0, 0.12, 1.5, 0.9, 0.2, 0.2, C.woodDark, 0, -0.5, 0);
-    this.root.add(new THREE.Mesh(cb.build(), new THREE.MeshLambertMaterial({ vertexColors: true })));
+    // A fire ring for the hot camp, and ground cover everywhere else.
+    arena.fireRing(0, 1.5);
+    arena.scatter(solid, QUALITY[this.R.quality].scatter);
+    arena.finish();
   }
 
   private spawnConvoyCamp() {
@@ -357,7 +338,7 @@ export class CampScene extends Scene {
         if (k >= 0) this.vehicles.splice(k, 1);
         old.destroy();
       }
-      const v = this.spawnVehicle({ tier: this.campaign.players[i].tier, x, z, yaw, ownerIndex: i, fuelFrac: 1 });
+      const v = this.spawnVehicle({ build: this.campaign.buildOf(i), x, z, yaw, ownerIndex: i });
       v.setEngine(false);
       p.ownVehicle = v;
     }
@@ -383,6 +364,7 @@ export class CampScene extends Scene {
 
   /** Ledger backdrop: the camp at dawn, with a slow orbit around each player's vehicle. */
   tickIdle(dt: number) {
+    this.idleCam = true;
     this.time += dt;
     this.idleYaw += dt * 0.12;
     for (let i = 0; i < this.players.length; i++) {
@@ -390,9 +372,10 @@ export class CampScene extends Scene {
       const v = p.ownVehicle;
       const px = v ? v.position.x : p.pos.x;
       const pz = v ? v.position.z : p.pos.z;
+      // The garage preview is a narrow strip, so the camera backs off far enough to fit the whole vehicle.
       p.cam.update(dt, { x: px, y: 0, z: pz, yaw: this.idleYaw + i * Math.PI, speed: 0, topSpeed: 10 }, 'camp', {
-        dist: v ? v.def.camera.dist * 1.1 : 6,
-        height: v ? v.def.camera.height : 3,
+        dist: this.preview ? (v ? v.def.length * 2.9 + 2 : 12) : v ? v.def.camera.dist * 1.1 : 6,
+        height: this.preview ? (v ? v.def.camera.height * 1.1 : 3) : v ? v.def.camera.height : 3,
         aimYaw: 0,
         aimPitch: 0,
         lookYaw: 0,
@@ -404,6 +387,9 @@ export class CampScene extends Scene {
       p.prevPos.copy(p.pos);
     }
     for (const v of this.vehicles) v.snapshotPrev();
+    // Parked vehicles still run their suspension, so cars with real ground clearance sit at the right height.
+    for (const v of this.vehicles) v.update(dt);
+    this.cars.update(dt);
     this.P.step();
     this.fx.fire(0, 0.3, 1.5, 0.9);
     if (Math.random() < 0.2) this.fx.blackSmoke(0, 0.9, 1.5);
@@ -422,7 +408,7 @@ export class CampScene extends Scene {
 
   private planRaid() {
     this.signatureS = this.campSignature();
-    const veh = this.vehicles.filter((v) => v.faction === 'convoy' && v.kind === 'player').map((v) => ({ tier: v.def.tier, moduleLevels: Object.values(v.mods).reduce((a, b) => a + b, 0) }));
+    const veh = this.vehicles.filter((v) => v.faction === 'convoy' && v.kind === 'player').map((v) => ({ tier: v.def.tier, moduleLevels: v.build ? Object.values(modsOf(v.build.fit)).reduce((a, b) => a + b, 0) : 0 }));
     const power = convoyPower(veh, this.campaign.crewLive.length, this.structures.filter((s) => s.def.id === 'turret').length);
     this.raidKind = pickRaidKind(this.biome, this.signatureS, this.raidRng);
     this.plan = planRaid({
@@ -507,7 +493,7 @@ export class CampScene extends Scene {
     const b = new MeshBuilder();
     b.jitter = 0.06;
     buildElementMesh(b, def, sx, sy, sz);
-    const mesh = new THREE.Mesh(b.build(), new THREE.MeshLambertMaterial({ vertexColors: true }));
+    const mesh = new THREE.Mesh(b.build(), kitMaterial());
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.position.set(x, 0, z);
@@ -611,7 +597,7 @@ export class CampScene extends Scene {
       // Hold B to be ready.
       if (isHeld(it, Btn.B) && heldFor(it, Btn.B) > 1.1 && !this.ready[i]) {
         this.ready[i] = true;
-        p.note('Ready for nightfall: waiting for your partner', 'good');
+        p.note(this.campaign.solo ? 'Ready for nightfall' : 'Ready for nightfall: waiting for your partner', 'good');
       }
     }
     // X: assign a watch post in the sector you are standing in.
@@ -787,11 +773,11 @@ export class CampScene extends Scene {
       this.updateNight(dt);
     }
     // Camp failure: both down.
-    const down = this.players.every((p) => p.state === 'downed' || p.state === 'dead');
+    const down = this.everyoneDown;
     this.downBothT = down ? this.downBothT + dt : 0;
     if (this.downBothT > 1.5) {
       this.downBothT = -999;
-      this.onResult({ type: 'fail', reason: 'You both went down defending the camp.' });
+      this.onResult({ type: 'fail', reason: this.campaign.solo ? 'You bled out defending the camp.' : 'You both went down defending the camp.' });
     }
   }
 
@@ -1050,11 +1036,8 @@ export class CampScene extends Scene {
       }
     }
     // Spotlights burned fuel at night: already deducted. Save vehicle HP for the Ledger.
-    for (let i = 0; i < 2; i++) {
-      const own = this.players[i]?.ownVehicle;
-      if (own) c.players[i].hpFrac = own.wreck ? 0.5 : own.hpFrac;
-      if (own?.wreck) c.players[i].tier = Math.max(1, c.players[i].tier - 1) as 1 | 2 | 3;
-    }
+    const lost = this.commitFleet();
+    for (const name of lost) lines.push(`${name} was wrecked in the raid and is lost.`);
     this.report = { lines, crew };
     // Rest the players.
     for (const p of this.players) {
@@ -1127,6 +1110,7 @@ export class CampScene extends Scene {
       s.mesh.removeFromParent();
     }
     this.structures.length = 0;
+    this.arena?.dispose();
     super.dispose();
   }
 
@@ -1141,46 +1125,72 @@ void whole;
 function buildElementMesh(b: MeshBuilder, def: BuildElementDef, sx: number, sy: number, sz: number) {
   switch (def.id) {
     case 'barricade': {
-      // Welded panels: planks, a door skin and tyres at the base.
-      b.box(0, sy / 2, 0, sx, sy, sz, C.woodDark);
-      for (let i = -1; i <= 1; i++) b.box(i * (sx / 3), sy / 2, sz * 0.55, sx / 3 - 0.08, sy - 0.1, 0.08, C.rust);
-      b.box(0, sy - 0.1, sz * 0.6, sx, 0.12, 0.08, C.signYellow);
-      for (let i = -1; i <= 1; i++) b.cyl(i * 0.95, 0.25, 0, 0.55, 0.3, 0.55, C.tire, Math.PI / 2, 0, 0, 10);
+      // Welded panel: a car door, sheet steel and planks over a frame, tyres stacked at the foot.
+      b.box(0, sy / 2, -0.05, sx, sy, 0.12, S.wood(C.woodDark, 0.8));
+      for (let i = -1; i <= 1; i++) plate(b, i * (sx / 3), sy / 2 + (i === 0 ? 0.05 : -0.04), sz * 0.25, sx / 3 - 0.04, sy - 0.15, 0.04, i === 0 ? S.rust(C.rust) : S.steel(0x5c6064, 0.85), 0, 0, i * 0.02);
+      b.box(0, sy - 0.1, sz * 0.36, sx, 0.12, 0.04, S.paint(C.signYellow, 0.7));
+      for (const x of [-sx / 2 + 0.1, sx / 2 - 0.1]) b.rod(x, 0, -0.25, x, sy + 0.1, -0.25, 0.05, S.steel(0x3a3c3e), 8);
+      for (let i = -1; i <= 1; i++) spareTyre(b, i * 0.95, 0.15, -0.55, 0.32, 0.2, 0, i);
       break;
     }
     case 'wire': {
-      for (let i = 0; i < 4; i++) b.cyl(-sx / 2 + (i * sx) / 3, sy / 2, 0, 0.1, sy, 0.1, C.darkMetal);
-      for (const y of [0.2, 0.4, 0.6]) b.box(0, y, 0, sx, 0.03, 0.03, C.steel);
-      for (let i = 0; i < 12; i++) b.box(-sx / 2 + (i / 11) * sx, 0.4, 0, 0.05, 0.5, 0.05, C.steel, 0.4, 0, 0.5);
+      // Pickets with a coil of razor wire.
+      for (let i = 0; i < 4; i++) b.rod(-sx / 2 + (i * sx) / 3, 0, 0, -sx / 2 + (i * sx) / 3 + 0.05, sy + 0.1, 0, 0.025, S.steel(0x4a4c4e, 0.8), 6);
+      const pts: [number, number, number][] = [];
+      for (let i = 0; i <= 80; i++) {
+        const t = i / 80;
+        const a = t * 22 * Math.PI;
+        pts.push([-sx / 2 + t * sx, sy * 0.5 + Math.sin(a) * sy * 0.45, Math.cos(a) * sz * 0.4]);
+      }
+      b.pipe(pts, 0.008, S.steel(0xa0a4a8, 0.4), 4);
+      for (const y of [0.15, sy * 0.85]) b.rod(-sx / 2, y, 0, sx / 2, y, 0, 0.006, S.steel(0x8a8e92), 4);
       break;
     }
     case 'spikes': {
-      b.box(0, 0.06, 0, sx, 0.1, sz, C.darkMetal);
-      for (let i = 0; i < 9; i++) for (let j = 0; j < 2; j++) b.add('cone6', -sx / 2 + (i + 0.5) * (sx / 9), 0.2, -0.2 + j * 0.4, 0.12, 0.28, 0.12, C.steel);
+      b.rbox(0, 0.04, 0, sx, 0.08, sz, 0.02, S.steel(0x3a3c3e, 0.8));
+      for (let i = 0; i < 12; i++) for (let j = 0; j < 3; j++) b.add('cone6', -sx / 2 + (i + 0.5) * (sx / 12), 0.17, -sz * 0.3 + j * sz * 0.3, 0.07, 0.2, 0.07, S.steel(0xa0a4a8, 0.4), (j - 1) * 0.3, 0, 0);
       break;
     }
     case 'spotlight': {
-      b.cyl(0, sy / 2, 0, 0.18, sy, 0.18, C.darkMetal);
-      b.box(0, sy - 0.1, 0, 0.7, 0.5, 0.5, C.metal);
-      b.box(0, sy - 0.1, 0.28, 0.5, 0.35, 0.06, 0xfff4c8);
+      // Tripod with a big lamp head, a cable and a jerry-can generator.
+      for (let i = 0; i < 3; i++) {
+        const a = (i / 3) * Math.PI * 2;
+        b.rod(Math.cos(a) * 0.45, 0, Math.sin(a) * 0.45, 0, sy - 0.4, 0, 0.03, S.metal(0x3a3c3e), 6);
+      }
+      b.rod(0, sy - 0.5, 0, 0, sy - 0.15, 0, 0.04, S.metal(0x3a3c3e), 8);
+      b.frustum(0, sy - 0.05, -0.05, 0.3, 0.22, 0.5, S.paint(0x2c2e30, 0.7), Math.PI / 2, 0, 0, 16);
+      b.cyl(0, sy - 0.05, 0.21, 0.56, 0.04, 0.56, S.glow(0xfff4c8, 3), Math.PI / 2, 0, 0, 16);
+      b.torus(0, sy - 0.05, 0.22, 0.29, 0.025, S.chrome(), 0, 0, 0, 6, 20);
+      b.rbox(0.45, 0.25, -0.4, 0.5, 0.45, 0.35, 0.04, S.paint(0xc89a2a, 0.7));
+      b.pipe([[0, sy - 0.4, 0], [0.2, 0.4, -0.2], [0.45, 0.3, -0.3]], 0.015, S.rubber(), 5);
       break;
     }
     case 'turret': {
-      b.box(0, 0.5, 0, sx, 1.0, sz, C.concreteDark);
-      b.cyl(0, 1.1, 0, 0.8, 0.3, 0.8, C.darkMetal);
-      b.box(0, 1.35, 0.1, 0.35, 0.3, 0.7, C.steel);
-      b.tube(0, 1.35, 0.4, 0, 1.35, 1.1, 0.1, C.darkMetal);
+      // Sandbagged nest with a pintle gun.
+      for (let ring = 0; ring < 3; ring++) {
+        for (let i = 0; i < 10; i++) {
+          const a = (i / 10) * Math.PI * 2 + ring * 0.3;
+          b.rbox(Math.cos(a) * sx * 0.42, 0.13 + ring * 0.25, Math.sin(a) * sz * 0.42, 0.55, 0.26, 0.34, 0.1, S.cloth(ring % 2 ? 0x8a7a5a : 0x7a6c50, 0.7), 0, -a, 0);
+        }
+      }
+      b.cyl(0, 0.85, 0, 0.16, 0.6, 0.16, S.steel(0x3a3c3e), 0, 0, 0, 10);
+      const g = new MeshBuilder();
+      heavyGun(g, 1.1, true);
+      b.appendMatrix(g, new THREE.Matrix4().compose(new THREE.Vector3(0, 1.3, 0), new THREE.Quaternion(), new THREE.Vector3(1, 1, 1)));
       break;
     }
     case 'drum': {
-      b.cyl(0, 0.5, 0, 0.7, 1.0, 0.7, C.fuel, 0, 0, 0, 10);
-      b.cyl(0, 1.0, 0, 0.72, 0.06, 0.72, C.darkMetal, 0, 0, 0, 10);
-      b.box(0, 0.7, 0.36, 0.3, 0.2, 0.02, 0xf0d070);
+      drum(b, 0, 0, 0, C.fuel, 0.95, 0.33);
+      b.box(0, 0.6, 0.34, 0.36, 0.28, 0.01, S.paint(0xf0d070, 0.6));
+      b.add('cone6', 0, 0.62, 0.35, 0.1, 0.16, 0.01, S.paint(0x1a1a1a, 0.5), 0, 0, Math.PI);
+      b.pipe([[0.2, 0.95, 0], [0.4, 1.05, 0.1], [0.6, 0.1, 0.4]], 0.006, S.paint(0xd23a3a, 0.4), 4);
       break;
     }
     case 'mine': {
-      b.cyl(0, 0.06, 0, 0.6, 0.1, 0.6, 0x2a2a2a, 0, 0, 0, 10);
-      b.cyl(0, 0.12, 0, 0.2, 0.06, 0.2, 0xff4a3a, 0, 0, 0, 6);
+      b.cyl(0, 0.05, 0, 0.6, 0.1, 0.6, S.paint(0x3e4a2e, 0.7), 0, 0, 0, 16);
+      b.cyl(0, 0.11, 0, 0.42, 0.04, 0.42, S.paint(0x2e3824, 0.6), 0, 0, 0, 16);
+      b.cyl(0, 0.15, 0, 0.12, 0.05, 0.12, S.metal(0x5a5a5a), 0, 0, 0, 10);
+      b.sphereAt(0.12, 0.14, 0.12, 0.025, S.glow(0xff3a2a, 2.5), false);
       break;
     }
     default:

@@ -1,24 +1,46 @@
 import * as THREE from 'three';
+import { atmoUniforms } from './atmosphere';
+import { GLOBALS } from './materials';
+import { smokeTexture } from './proctex';
 
-const vert = `
+const vert = /* glsl */ `
 attribute float aSize;
 attribute vec4 aColor;
+attribute float aRot;
 varying vec4 vColor;
+varying float vRot;
+varying float vDepth;
 uniform float uScale;
+#include <fog_pars_vertex>
 void main() {
   vColor = aColor;
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  gl_Position = projectionMatrix * mv;
-  gl_PointSize = aSize * uScale / max(0.1, -mv.z);
+  vRot = aRot;
+  vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+  gl_Position = projectionMatrix * mvPosition;
+  gl_PointSize = aSize * uScale / max( 0.1, -mvPosition.z );
+  vDepth = -mvPosition.z;
+  #include <fog_vertex>
 }`;
-const frag = `
+const frag = /* glsl */ `
+uniform sampler2D tPuff;
+uniform vec3 uLight;
+uniform float uLit;
 varying vec4 vColor;
+varying float vRot;
+varying float vDepth;
+#include <fog_pars_fragment>
 void main() {
   vec2 c = gl_PointCoord - 0.5;
-  float d = length(c) * 2.0;
-  float a = smoothstep(1.0, 0.25, d) * vColor.a;
-  if (a < 0.01) discard;
-  gl_FragColor = vec4(vColor.rgb, a);
+  float s = sin( vRot );
+  float k = cos( vRot );
+  vec2 uv = vec2( c.x * k - c.y * s, c.x * s + c.y * k ) + 0.5;
+  vec4 t = texture2D( tPuff, uv );
+  // Fade sprites that get right up to the lens instead of filling the screen.
+  float a = mix( smoothstep( 1.0, 0.25, length( c ) * 2.0 ), t.a, uLit ) * vColor.a * smoothstep( 0.4, 2.2, vDepth );
+  if ( a < 0.004 ) discard;
+  vec3 col = vColor.rgb * mix( vec3( 1.0 ), uLight * ( 0.7 + t.r * 0.45 ), uLit );
+  gl_FragColor = vec4( col, a );
+  #include <fog_fragment>
 }`;
 
 /** One pool of CPU-simulated sprites. Two instances exist: alpha for smoke and dust, additive for fire and flashes. */
@@ -36,8 +58,10 @@ export class ParticleLayer {
   private a0: Float32Array;
   private grav: Float32Array;
   private drag: Float32Array;
+  private rot: Float32Array;
+  private spin: Float32Array;
   private next = 0;
-  private uniforms = { uScale: { value: 800 } };
+  private uniforms: Record<string, THREE.IUniform>;
   private geo: THREE.BufferGeometry;
   budget = 1;
 
@@ -54,16 +78,28 @@ export class ParticleLayer {
     this.a0 = new Float32Array(n);
     this.grav = new Float32Array(n);
     this.drag = new Float32Array(n);
+    this.rot = new Float32Array(n);
+    this.spin = new Float32Array(n);
     this.geo = new THREE.BufferGeometry();
     this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
     this.geo.setAttribute('aColor', new THREE.BufferAttribute(this.col, 4).setUsage(THREE.DynamicDrawUsage));
     this.geo.setAttribute('aSize', new THREE.BufferAttribute(this.size, 1).setUsage(THREE.DynamicDrawUsage));
+    this.geo.setAttribute('aRot', new THREE.BufferAttribute(this.rot, 1).setUsage(THREE.DynamicDrawUsage));
+    // Smoke and dust are lit by the scene and fade into the haze; additive glow stays self-lit.
+    this.uniforms = {
+      ...atmoUniforms(),
+      uScale: { value: 800 },
+      tPuff: { value: smokeTexture() },
+      uLight: GLOBALS.uLight,
+      uLit: { value: additive ? 0 : 1 },
+    };
     const mat = new THREE.ShaderMaterial({
       uniforms: this.uniforms,
       vertexShader: vert,
       fragmentShader: frag,
       transparent: true,
       depthWrite: false,
+      fog: !additive,
       blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
     });
     this.points = new THREE.Points(this.geo, mat);
@@ -96,6 +132,8 @@ export class ParticleLayer {
     this.col[i * 4 + 2] = b;
     this.grav[i] = gravity;
     this.drag[i] = drag;
+    this.rot[i] = Math.random() * Math.PI * 2;
+    this.spin[i] = (Math.random() - 0.5) * 1.2;
   }
 
   update(dt: number) {
@@ -115,11 +153,13 @@ export class ParticleLayer {
       this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt;
       this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt;
       this.size[i] = this.s0[i] + (this.s1[i] - this.s0[i]) * t;
+      this.rot[i] += this.spin[i] * dt;
       this.col[i * 4 + 3] = this.a0[i] * (1 - t) * (t < 0.08 ? t / 0.08 : 1);
     }
     (this.geo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     (this.geo.attributes.aColor as THREE.BufferAttribute).needsUpdate = true;
     (this.geo.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
+    (this.geo.attributes.aRot as THREE.BufferAttribute).needsUpdate = true;
   }
 }
 

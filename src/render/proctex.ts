@@ -292,33 +292,56 @@ export function terrainTextures(): TerrainTextures {
   const small = voronoi(S, 26, 42, 0.95);
   const pebbles = voronoi(S, 48, 43, 0.8);
   const mottle = fbm(S, 6, { octaves: 5, seed: 44 });
+  const dust = fbm(S, 3, { octaves: 5, seed: 45 });
+  const grit = fbm(S, 48, { octaves: 2, seed: 46 });
   const earthH = new Float32Array(N);
   const earthA = new Float32Array(N);
   for (let i = 0; i < N; i++) {
+    // Drifted dust buries the cracks in patches, so the pattern never reads as paving.
+    const cover = sstep(0.3, 0.6, dust[i]);
     const edge = plates.f2[i] - plates.f1[i];
-    const crack = 1 - sstep(0.0, 0.06 + mottle[i] * 0.05, edge);
+    const crack = (1 - sstep(0.0, 0.03 + mottle[i] * 0.03, edge)) * (1 - cover * 0.85);
     const edge2 = small.f2[i] - small.f1[i];
-    const crack2 = (1 - sstep(0.0, 0.05, edge2)) * sstep(0.45, 0.7, mottle[i]);
-    const dome = sstep(0.0, 0.35, edge) * 0.25;
+    const crack2 = (1 - sstep(0.0, 0.03, edge2)) * sstep(0.5, 0.75, mottle[i]) * (1 - cover);
+    const dome = sstep(0.0, 0.3, edge) * 0.18 * (1 - cover);
     const peb = (1 - sstep(0.12, 0.3, pebbles.f1[i])) * sstep(0.55, 0.75, pebbles.id[i]);
-    earthH[i] = 0.55 + dome + mottle[i] * 0.2 - crack * 0.55 - crack2 * 0.3 + peb * 0.25;
-    earthA[i] = 0.8 + (mottle[i] - 0.5) * 0.2 + (plates.id[i] - 0.5) * 0.12 - crack * 0.45 - crack2 * 0.25 + peb * (pebbles.id[i] - 0.6) * 0.8;
+    earthH[i] = 0.55 + dome + mottle[i] * 0.15 + grit[i] * 0.1 - crack * 0.4 - crack2 * 0.2 + peb * 0.25;
+    earthA[i] = 0.8 + (mottle[i] - 0.5) * 0.16 + (plates.id[i] - 0.5) * 0.05 * (1 - cover) + (grit[i] - 0.5) * 0.08 - crack * 0.24 - crack2 * 0.12 + cover * 0.04 + peb * (pebbles.id[i] - 0.6) * 0.7;
   }
-  // --- rock: strata bands, fractures and lichen-free weathering
-  const rwarp = fbm(S, 3, { octaves: 5, seed: 51 });
-  const rfine = fbm(S, 24, { octaves: 3, seed: 52, ridged: true });
-  const rcell = voronoi(S, 7, 53, 0.9);
+  // --- rock: sedimentary beds of uneven thickness, staggered vertical joints, granular weathering
+  const rwarp = fbm(S, 2, { octaves: 5, seed: 51 });
+  const rfine = fbm(S, 32, { octaves: 3, seed: 52, ridged: true });
+  const rgrain = fbm(S, 64, { octaves: 2, seed: 54 });
+  const rblot = fbm(S, 4, { octaves: 4, seed: 55 });
   const rockH = new Float32Array(N);
   const rockA = new Float32Array(N);
+  // Bed boundaries (in v) with uneven spacing; each bed gets its own tone and joint spacing.
+  const beds: number[] = [0];
+  let rs = 977;
+  const rr = () => {
+    rs = (Math.imul(rs, 1664525) + 1013904223) >>> 0;
+    return rs / 4294967296;
+  };
+  while (beds[beds.length - 1] < 1) beds.push(beds[beds.length - 1] + 0.06 + rr() * 0.12);
+  beds[beds.length - 1] = 1;
+  const bedTone = beds.map(() => rr());
+  const bedJoint = beds.map(() => 3 + Math.floor(rr() * 5));
+  const bedShift = beds.map(() => rr());
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {
       const i = y * S + x;
-      const band = (y / S) * 7 + rwarp[i] * 1.8;
-      const f = band - Math.floor(band);
-      const ledge = sstep(0.0, 0.18, f) * (1 - sstep(0.75, 1.0, f) * 0.6);
-      const frac = 1 - sstep(0.0, 0.05, rcell.f2[i] - rcell.f1[i]);
-      rockH[i] = ledge * 0.55 + rfine[i] * 0.35 - frac * 0.4 + rwarp[i] * 0.1;
-      rockA[i] = 0.62 + ledge * 0.18 + (rfine[i] - 0.5) * 0.25 - frac * 0.35 + (Math.sin(band * 2.1) * 0.5 + 0.5) * 0.15;
+      const v = (y / S + (rwarp[i] - 0.5) * 0.03 + 1) % 1;
+      let k = 0;
+      while (k < beds.length - 2 && v >= beds[k + 1]) k++;
+      const f = (v - beds[k]) / (beds[k + 1] - beds[k]);
+      // Bed top overhangs, base is recessed: a profile that catches light like real ledges.
+      const prof = sstep(0.0, 0.12, f) * (1 - sstep(0.82, 1.0, f) * 0.55);
+      const bedLine = 1 - sstep(0.0, 0.05, Math.min(f, 1 - f) * (beds[k + 1] - beds[k]) * 12);
+      const ju = (x / S) * bedJoint[k] + bedShift[k] + (rwarp[i] - 0.5) * 0.15;
+      const jf = ju - Math.floor(ju);
+      const joint = (1 - sstep(0.0, 0.025, Math.min(jf, 1 - jf))) * sstep(0.25, 0.5, rblot[i]);
+      rockH[i] = prof * 0.5 + rfine[i] * 0.25 + rgrain[i] * 0.1 - joint * 0.35 - bedLine * 0.2 + 0.1;
+      rockA[i] = 0.55 + (bedTone[k] - 0.5) * 0.3 + prof * 0.1 + (rfine[i] - 0.5) * 0.18 + (rgrain[i] - 0.5) * 0.1 + (rblot[i] - 0.5) * 0.15 - joint * 0.3 - bedLine * 0.18;
     }
   }
   // --- gravel: packed stones
@@ -616,51 +639,122 @@ export function roadTextures(kind: 'wasteland' | 'city'): RoadTextures {
 
 // ------------------------------------------------------------------------------------------ sprites
 
-/** Alpha-tested dry grass: a fan of bent blades with seed heads. RGB is tint-ready (near white), A is coverage. */
+/** Alpha-tested dry grass: a fan of thin, curving blades. RGB is tint-ready (near white), A is coverage. */
 export function grassTexture(): THREE.Texture {
   return cached('grass', () => {
     const S = 256;
-    const out = new Uint8Array(S * S * 4);
+    const cov = new Float32Array(S * S);
+    const lum = new Float32Array(S * S);
     let s = 4242;
     const rnd = () => {
       s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
       return s / 4294967296;
     };
-    const blades = 46;
+    const blades = 95;
     for (let b = 0; b < blades; b++) {
-      const base = 0.18 + rnd() * 0.64;
-      const lean = (rnd() - 0.5) * 0.9;
-      const height = 0.45 + rnd() * 0.52;
-      const width = 2.2 + rnd() * 2.8;
-      const shade = 0.55 + rnd() * 0.45;
-      const head = rnd() < 0.25;
-      const steps = 120;
+      const off = (rnd() - 0.5) * 0.5;
+      const base = 0.5 + off * 0.5;
+      const lean = off * 1.9 + (rnd() - 0.5) * 0.3;
+      // Taller in the middle, splaying low at the sides: a dome-shaped tuft.
+      const height = (0.55 + rnd() * 0.42) * (1 - Math.abs(off) * 1.5);
+      const width = 0.9 + rnd() * 1.3;
+      const shade = 0.6 + rnd() * 0.4;
+      const steps = 160;
       for (let k = 0; k <= steps; k++) {
         const t = k / steps;
-        const cx = (base + lean * t * t * 0.6) * S;
-        const cy = S - 1 - t * height * S;
-        const w = width * (1 - t * 0.85) * (head && t > 0.8 ? 1.8 : 1);
-        for (let ox = -Math.ceil(w); ox <= Math.ceil(w); ox++) {
+        const cx = (base + lean * t * t * 0.55) * S;
+        const cy = S - 1 - t * height * S * (1 - Math.abs(lean) * t * 0.25);
+        const w = width * (1 - t * 0.9);
+        for (let ox = -2; ox <= 2; ox++) {
           const px = Math.round(cx + ox);
           const py = Math.round(cy);
           if (px < 0 || px >= S || py < 0 || py >= S) continue;
-          const i = (py * S + px) * 4;
-          const edge = 1 - Math.abs(ox) / (w + 0.5);
-          const l = (0.5 + 0.5 * t) * shade * (0.85 + edge * 0.15);
-          out[i] = b8(l);
-          out[i + 1] = b8(l * 0.97);
-          out[i + 2] = b8(l * 0.86);
-          out[i + 3] = Math.max(out[i + 3], b8(edge * 3));
+          const d = Math.abs(px - cx);
+          const a = sat(w + 0.5 - d);
+          if (a <= 0) continue;
+          const i = py * S + px;
+          if (a > cov[i] * 0.9) lum[i] = (0.58 + 0.42 * t) * shade;
+          cov[i] = Math.max(cov[i], a);
         }
       }
     }
-    // Bleed colour into transparent texels so mipmaps don't darken the edges.
+    const out = new Uint8Array(S * S * 4);
     for (let i = 0; i < S * S; i++) {
-      if (out[i * 4 + 3] === 0) {
-        out[i * 4] = 150;
-        out[i * 4 + 1] = 140;
-        out[i * 4 + 2] = 115;
+      const l = cov[i] > 0 ? lum[i] : 0.6;
+      out[i * 4] = b8(l);
+      out[i * 4 + 1] = b8(l * 0.96);
+      out[i * 4 + 2] = b8(l * 0.82);
+      out[i * 4 + 3] = b8(cov[i] * 1.4);
+    }
+    const t = toTexture(out, S, { srgb: true });
+    t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+    return t;
+  });
+}
+
+/** Desert shrub card: branching twigs with sage-leaf clusters. RGB colour (tinted per instance), A coverage. */
+export function bushTexture(): THREE.Texture {
+  return cached('bush', () => {
+    const S = 256;
+    const cov = new Float32Array(S * S);
+    const r = new Float32Array(S * S);
+    const g = new Float32Array(S * S);
+    const b = new Float32Array(S * S);
+    let s = 9191;
+    const rnd = () => {
+      s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+    const dot = (cx: number, cy: number, rad: number, cr: number, cg: number, cb: number) => {
+      for (let oy = -Math.ceil(rad); oy <= Math.ceil(rad); oy++) {
+        for (let ox = -Math.ceil(rad); ox <= Math.ceil(rad); ox++) {
+          const px = Math.round(cx + ox);
+          const py = Math.round(cy + oy);
+          if (px < 0 || px >= S || py < 0 || py >= S) continue;
+          const a = sat(rad + 0.5 - Math.hypot(ox, oy));
+          if (a <= 0) continue;
+          const i = py * S + px;
+          if (a >= cov[i] * 0.8) {
+            r[i] = cr;
+            g[i] = cg;
+            b[i] = cb;
+          }
+          cov[i] = Math.max(cov[i], a);
+        }
       }
+    };
+    const branch = (x: number, y: number, ang: number, len: number, w: number, depth: number) => {
+      const steps = Math.ceil(len);
+      let cx = x;
+      let cy = y;
+      for (let k = 0; k < steps; k++) {
+        ang += (rnd() - 0.5) * 0.12;
+        cx += Math.sin(ang);
+        cy -= Math.cos(ang);
+        const t = k / steps;
+        const tone = 0.28 + rnd() * 0.06;
+        dot(cx, cy, w * (1 - t * 0.6), tone, tone * 0.85, tone * 0.7);
+        if (depth < 2 && rnd() < 0.022) branch(cx, cy, ang + (rnd() < 0.5 ? -1 : 1) * (0.4 + rnd() * 0.5), len * (0.45 + rnd() * 0.25), w * 0.65, depth + 1);
+        // Leaf clusters along the upper part of each twig.
+        if (t > 0.4 && rnd() < 0.09 + depth * 0.05) {
+          const lr = 1.6 + rnd() * 2.2;
+          const v = rnd();
+          dot(cx + (rnd() - 0.5) * 4, cy + (rnd() - 0.5) * 4, lr, 0.52 + v * 0.18, 0.56 + v * 0.16, 0.44 + v * 0.1);
+        }
+      }
+      for (let k = 0; k < 3; k++) dot(cx + (rnd() - 0.5) * 6, cy + (rnd() - 0.5) * 6, 1.5 + rnd() * 1.5, 0.55, 0.6, 0.46);
+    };
+    for (let k = 0; k < 9; k++) {
+      const ang = (k / 8 - 0.5) * 2.2 + (rnd() - 0.5) * 0.2;
+      branch(S / 2 + (rnd() - 0.5) * 12, S - 2, ang, S * (0.5 + rnd() * 0.32) * (1 - Math.abs(ang) * 0.22), 2.2, 0);
+    }
+    const out = new Uint8Array(S * S * 4);
+    for (let i = 0; i < S * S; i++) {
+      const has = cov[i] > 0;
+      out[i * 4] = b8(has ? r[i] : 0.45);
+      out[i * 4 + 1] = b8(has ? g[i] : 0.47);
+      out[i * 4 + 2] = b8(has ? b[i] : 0.38);
+      out[i * 4 + 3] = b8(cov[i] * 1.3);
     }
     const t = toTexture(out, S, { srgb: true });
     t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;

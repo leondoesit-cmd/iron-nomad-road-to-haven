@@ -16,7 +16,11 @@ export const Btn = {
   Down: 13,
   Left: 14,
   Right: 15,
+  /** Not a physical button: the first / third person switch, driven by whatever the player binds to it. */
+  View: 16,
 } as const;
+/** Logical buttons, including View. */
+export const BTN_COUNT = 17;
 export type BtnName = keyof typeof Btn;
 
 export type DeviceKind = 'pad' | 'keyboard';
@@ -31,6 +35,10 @@ export interface PlayerIntent {
   move: [number, number];
   /** Right stick, x right-positive, y up-positive. */
   look: [number, number];
+  /** Mouse / trackpad look this tick as an angle in radians (x right-positive, y up-positive). Zero unless the pointer is captured. */
+  lookDelta: [number, number];
+  /** True while this seat is aimed by a captured mouse: pitch is free and is not recentred like Q/E aiming. */
+  mouse: boolean;
   /** Analog triggers 0..1. */
   lt: number;
   rt: number;
@@ -56,12 +64,14 @@ export function newIntent(): PlayerIntent {
     device: 'none',
     move: [0, 0],
     look: [0, 0],
+    lookDelta: [0, 0],
+    mouse: false,
     lt: 0,
     rt: 0,
     held: 0,
     pressed: 0,
     released: 0,
-    heldTime: new Float32Array(16),
+    heldTime: new Float32Array(BTN_COUNT),
     stickLoops: 0,
     handbrake: false,
     sprint: false,

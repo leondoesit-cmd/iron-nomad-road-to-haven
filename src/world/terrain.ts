@@ -1,10 +1,12 @@
 import type { LegDef } from '../data';
-import { Rng, fbm2, noise2 } from '../core/rng';
+import { Rng, fbm2, hash2, noise2 } from '../core/rng';
 import { clamp, smoothstep, lerp } from '../core/math';
+import { dockDeckAt, lakeAdjust, lakeWater, planLakeSites, planLakes, type Bay, type Lake, type WaterHit } from './lakes';
+import { planMainlandDelve, type DelveSite } from './delveSites';
 
 export const CHUNK = 128;
-export const CELL = 4; // heightfield resolution in metres
-export const CELLS = CHUNK / CELL; // 32
+export const CELL = 2; // heightfield resolution in metres
+export const CELLS = CHUNK / CELL; // 64
 
 export type Surface = 'asphalt' | 'hardpan' | 'sand' | 'mud';
 
@@ -32,6 +34,53 @@ export interface Minefield {
   halfWidth: number;
 }
 
+export type SiteKind =
+  | 'gasStop'
+  | 'hamlet'
+  | 'motel'
+  | 'farm'
+  | 'depot'
+  | 'overpass'
+  | 'windfarm'
+  | 'mastHill'
+  // Lakeside places and the ways underground (see world/lakes.ts, world/delveSites.ts).
+  | 'lakeDock'
+  | 'islandShack'
+  | 'islandWreck'
+  | 'islandLighthouse'
+  | 'islandRuin'
+  | 'islandCave'
+  | 'delveCave'
+  | 'delveMine'
+  | 'delveBunker';
+
+/** A roadside place worth stopping at (wasteland only). The terrain flattens a pad under it. */
+export interface Site {
+  kind: SiteKind;
+  z: number;
+  /** Side of the road it sits on: -1 or 1. */
+  side: -1 | 1;
+  /** Distance of its centre from the road centre-line. */
+  off: number;
+  /** Radius of the flattened ground. 0 means the terrain is left alone. */
+  radius: number;
+  seed: number;
+  x: number;
+  /** Lake places: which lake, and which of its islands. Delve entrances: the delve's id. */
+  lake?: number;
+  island?: number;
+  delve?: string;
+}
+
+/** Level ground under a building, so its floor sits flush with the terrain. */
+export interface Foundation {
+  x0: number;
+  x1: number;
+  z0: number;
+  z1: number;
+  h: number;
+}
+
 export interface TerrainDef {
   biome: 'wasteland' | 'city';
   seed: number;
@@ -41,6 +90,14 @@ export interface TerrainDef {
   canyons: Canyon[];
   minefields: Minefield[];
   phase: [number, number, number, number];
+  sites: Site[];
+  foundations: Foundation[];
+  /** Lakes (wasteland only) with their islands and docks, and the bays that widen the corridor around them. */
+  lakes: Lake[];
+  bays: Bay[];
+  /** Ways underground in the open country and on lake islands. */
+  delves: DelveSite[];
+  theme: 'dust' | 'salt' | 'cinder';
 }
 
 export function makeTerrainDef(leg: LegDef): TerrainDef {
@@ -54,6 +111,12 @@ export function makeTerrainDef(leg: LegDef): TerrainDef {
     canyons: [],
     minefields: [],
     phase: [rng.range(0, 6.28), rng.range(0, 6.28), rng.range(0, 6.28), rng.range(0, 6.28)],
+    sites: [],
+    foundations: [],
+    lakes: [],
+    bays: [],
+    delves: [],
+    theme: leg.theme ?? 'dust',
   };
   for (const s of leg.sets) {
     if (s.type === 'rampCache') {
@@ -73,7 +136,92 @@ export function makeTerrainDef(leg: LegDef): TerrainDef {
       def.minefields.push({ z0: s.at, z1: s.at + (s.length as number), halfWidth: 20 });
     }
   }
+  if (leg.biome === 'wasteland') {
+    def.sites = planSites(def, leg);
+    def.lakes = planLakes(def, leg).lakes;
+    const lakeSites = planLakeSites(def, leg);
+    def.sites.push(...lakeSites.sites);
+    def.delves.push(...lakeSites.delves);
+    const main = planMainlandDelve(def, leg);
+    if (main) {
+      def.sites.push(main.site);
+      def.delves.push(main.delve);
+    }
+  }
   return def;
+}
+
+const SITE_ROTATION: SiteKind[] = ['gasStop', 'hamlet', 'windfarm', 'motel', 'farm', 'overpass', 'depot', 'mastHill'];
+const SITE_SPEC: Record<SiteKind, { off: [number, number]; radius: number }> = {
+  gasStop: { off: [22, 28], radius: 36 },
+  hamlet: { off: [48, 62], radius: 58 },
+  motel: { off: [32, 38], radius: 46 },
+  farm: { off: [66, 82], radius: 64 },
+  depot: { off: [52, 64], radius: 62 },
+  overpass: { off: [0, 0], radius: 34 },
+  windfarm: { off: [90, 130], radius: 0 },
+  mastHill: { off: [60, 90], radius: 26 },
+  lakeDock: { off: [0, 0], radius: 0 },
+  islandShack: { off: [0, 0], radius: 0 },
+  islandWreck: { off: [0, 0], radius: 0 },
+  islandLighthouse: { off: [0, 0], radius: 0 },
+  islandRuin: { off: [0, 0], radius: 0 },
+  islandCave: { off: [0, 0], radius: 0 },
+  delveCave: { off: [0, 0], radius: 26 },
+  delveMine: { off: [0, 0], radius: 26 },
+  delveBunker: { off: [0, 0], radius: 26 },
+};
+
+/** True where nothing authored (set pieces, canyons) claims the stretch of road around z. */
+export function keepOutZ(def: TerrainDef, leg: LegDef): (z: number) => boolean {
+  const keepOut: [number, number][] = [];
+  const ext: Record<string, number> = { fuelCache: 60, scrapPile: 70, partsWreck: 100, rampCache: 130, encounter: 20, radioFragment: 20, chassisWreck: 20, ambush: 20 };
+  for (const s of leg.sets) {
+    const len = s.type === 'minefield' ? (s.length as number) : (ext[s.type] ?? 0);
+    keepOut.push([s.at - 60, s.at + len + 60]);
+  }
+  return (z) => !keepOut.some(([a, b]) => z > a && z < b) && !def.canyons.some((c) => z > c.z0 - 90 && z < c.z1 + 90);
+}
+
+/** Where roadside places go: spaced along the leg, clear of the authored set pieces. */
+function planSites(def: TerrainDef, leg: LegDef): Site[] {
+  const rng = new Rng(leg.seed * 31 + 5);
+  const free = keepOutZ(def, leg);
+  const sites: Site[] = [];
+  let z = rng.range(240, 340);
+  let k = Math.floor(rng.range(0, SITE_ROTATION.length));
+  while (z < leg.length - 220) {
+    let zz = z;
+    for (let t = 0; t < 8 && !free(zz); t++) zz += 55;
+    if (free(zz) && zz < leg.length - 220) {
+      const kind = SITE_ROTATION[k % SITE_ROTATION.length];
+      k++;
+      const spec = SITE_SPEC[kind];
+      const side = rng.sign();
+      const ch = corridorHalf(def, zz);
+      const off = Math.min(rng.range(spec.off[0], spec.off[1]), ch - spec.radius - (spec.radius ? 25 : 30));
+      if (off >= spec.off[0] * 0.6) {
+        const x = roadX(def, zz) + side * off;
+        sites.push({ kind, z: zz, side, off, radius: spec.radius, seed: rng.int(1, 99999), x });
+      }
+    }
+    z = zz + rng.range(260, 400);
+  }
+  return sites;
+}
+
+/** 0 in the narrow, craggy stretches, 1 in the wide basins where the cliffs stand back and the horizon opens. */
+export function openness(def: TerrainDef, z: number): number {
+  if (def.biome === 'city') return 0;
+  const [p1, p2] = def.phase;
+  return smoothstep(-0.45, 0.4, 0.62 * Math.sin(z / 260 + p1 * 3) + 0.38 * Math.sin(z / 131 + p2 * 5));
+}
+
+/** 0 on the hard flats, 1 in the rolling dune seas. */
+export function duneness(def: TerrainDef, z: number): number {
+  if (def.biome === 'city') return 0;
+  const [, , p3, p4] = def.phase;
+  return smoothstep(-0.05, 0.6, 0.62 * Math.sin(z / 250 + p3 * 2) + 0.38 * Math.sin(z / 97 + p4 * 3));
 }
 
 /** Road centre-line x for a given z. Straight in cities, winding in the wastelands. */
@@ -98,12 +246,43 @@ export function roadElev(def: TerrainDef, z: number): number {
 
 /** Half-width of the open corridor at z: the wasteland is wide, canyons squeeze it. */
 export function corridorHalf(def: TerrainDef, z: number): number {
-  let w = def.biome === 'city' ? 150 : 170;
+  let w = def.biome === 'city' ? 150 : lerp(190, 460, openness(def, z));
   for (const c of def.canyons) {
     const t = smoothstep(c.z0, c.z0 + 70, z) * (1 - smoothstep(c.z1 - 70, c.z1, z));
     if (t > 0) w = lerp(w, c.halfWidth + 6 * Math.sin(z / 23) + 4 * Math.sin(z / 9.7), t);
   }
+  // Bays stand the cliffs back around a lake.
+  for (const b of def.bays) {
+    const t = smoothstep(b.z0, b.z0 + 90, z) * (1 - smoothstep(b.z1 - 90, b.z1, z));
+    if (t > 0 && b.half > w) w = lerp(w, b.half, t);
+  }
   return w;
+}
+
+/** Flat-topped mesas standing in the open country. They keep clear of the road and of any roadside site. */
+export function buttes(def: TerrainDef, x: number, z: number): number {
+  if (def.biome === 'city') return 0;
+  const STEP = 190;
+  const i0 = Math.floor(z / STEP);
+  let out = 0;
+  for (let i = i0 - 1; i <= i0 + 1; i++) {
+    const k = hash2(i, 1, def.seed + 95);
+    if (k > 0.62) continue;
+    const zc = (i + 0.2 + hash2(i, 2, def.seed + 96) * 0.6) * STEP;
+    const ch = corridorHalf(def, zc);
+    if (ch < 220) continue;
+    const r = 16 + hash2(i, 3, def.seed + 97) * 26;
+    const side = hash2(i, 4, def.seed + 98) < 0.5 ? -1 : 1;
+    const off = 120 + hash2(i, 5, def.seed + 99) * Math.max(0, ch - 120 - r - 25);
+    const xc = roadX(def, zc) + side * off;
+    const dd = Math.hypot(x - xc, z - zc);
+    if (dd > r * 1.1) continue;
+    if (def.sites.some((s) => Math.hypot(s.x - xc, s.z - zc) < s.radius + r + 20)) continue;
+    const H = 10 + hash2(i, 6, def.seed + 100) * 30;
+    const t = smoothstep(r, r * 0.6, dd);
+    out = Math.max(out, H * t * (1 - 0.1 * noise2(x / 6, z / 6, def.seed + 101)));
+  }
+  return out;
 }
 
 function rampHeight(r: Ramp, rx: number, z: number, xc: number): number {
@@ -133,6 +312,26 @@ function rampHeight(r: Ramp, rx: number, z: number, xc: number): number {
 
 /** Terrain height under (x, z). The same function drives meshes, colliders, props and AI. */
 export function heightAt(def: TerrainDef, x: number, z: number): number {
+  const h = baseHeight(def, x, z);
+  if (def.lakes.length === 0) return h;
+  for (const l of def.lakes) {
+    // Lakes are far apart, so at most one of them reshapes any given point.
+    const a = lakeAdjust(l, x, z, h);
+    if (a === h) continue;
+    // A building on a lake island still gets its level pad (the lake replaced the ground the pad was cut into).
+    let out = a;
+    for (const f of def.foundations) {
+      if (z < f.z0 - 3.5 || z > f.z1 + 3.5 || x < f.x0 - 3.5 || x > f.x1 + 3.5) continue;
+      const d = Math.hypot(Math.max(f.x0 - x, 0, x - f.x1), Math.max(f.z0 - z, 0, z - f.z1));
+      out += (f.h - out) * (1 - smoothstep(0, 3.5, d));
+    }
+    return out;
+  }
+  return h;
+}
+
+/** The ground before any lake is carved into it. */
+export function baseHeight(def: TerrainDef, x: number, z: number): number {
   const rx = roadX(def, z);
   const re = roadElev(def, z);
   if (def.biome === 'city') {
@@ -144,8 +343,20 @@ export function heightAt(def: TerrainDef, x: number, z: number): number {
   const dx = x - rx;
   const d = Math.abs(dx);
   const w = smoothstep(def.roadHalf + 1, def.roadHalf + 18, d);
-  const dunes = 4.2 * fbm2(x / 78, z / 78, def.seed, 3) + 1.1 * fbm2(x / 19, z / 19, def.seed + 7, 2);
+  const dn = duneness(def, z);
+  const dunes = lerp(0.9, 8.6, dn) * fbm2(x / lerp(120, 70, dn), z / lerp(120, 70, dn), def.seed, 3) + lerp(0.35, 1.4, dn) * fbm2(x / 19, z / 19, def.seed + 7, 2);
   let h = re + w * dunes;
+  for (const s of def.sites) {
+    if (s.radius <= 0 || Math.abs(z - s.z) > s.radius * 1.4) continue;
+    const p = 1 - smoothstep(s.radius * 0.78, s.radius * 1.3, Math.hypot(x - s.x, z - s.z));
+    if (p > 0) h += (re - h) * p;
+  }
+  for (const f of def.foundations) {
+    if (z < f.z0 - 3.5 || z > f.z1 + 3.5 || x < f.x0 - 3.5 || x > f.x1 + 3.5) continue;
+    const out = Math.hypot(Math.max(f.x0 - x, 0, x - f.x1), Math.max(f.z0 - z, 0, z - f.z1));
+    h += (f.h - h) * (1 - smoothstep(0, 3.5, out));
+  }
+  h += buttes(def, x, z);
   for (const r of def.ramps) {
     const xc = roadX(def, r.z0 + r.len) + r.xOff;
     const rh = rampHeight(r, x, z, xc);
@@ -168,8 +379,9 @@ export function surfaceAt(def: TerrainDef, x: number, z: number): Surface {
   if (def.biome === 'city') return d < def.roadHalf ? 'asphalt' : Math.abs(Math.floor(z / 7)) % 9 === 0 ? 'asphalt' : 'hardpan';
   if (d < def.roadHalf) return 'asphalt';
   if (d < def.roadHalf + 3) return 'hardpan';
+  if (def.lakes.length && lakeWater(def.lakes, x, z)) return 'mud';
   const sand = noise2(x / 65 + 40, z / 65 - 11, def.seed + 21);
-  if (sand > 0.64) return 'sand';
+  if (sand > lerp(0.7, 0.5, duneness(def, z))) return 'sand';
   const mud = noise2(x / 48 - 90, z / 48 + 33, def.seed + 45);
   if (mud > 0.76 && heightAt(def, x, z) < roadElev(def, z) + 0.8) return 'mud';
   return 'hardpan';
@@ -216,3 +428,16 @@ export const clampToCorridor = (def: TerrainDef, x: number, z: number) => {
   const h = corridorHalf(def, z) - 2;
   return clamp(x, rx - h, rx + h);
 };
+
+/** Water over the ground at a point, or null on dry land. */
+export function waterAt(def: TerrainDef, x: number, z: number): WaterHit | null {
+  return def.lakes.length ? lakeWater(def.lakes, x, z) : null;
+}
+
+/** Where a person stands: the terrain, or a dock deck standing over it. */
+export function groundHeight(def: TerrainDef, x: number, z: number): number {
+  const h = heightAt(def, x, z);
+  if (def.lakes.length === 0) return h;
+  const deck = dockDeckAt(def.lakes, x, z);
+  return deck > h ? deck : h;
+}

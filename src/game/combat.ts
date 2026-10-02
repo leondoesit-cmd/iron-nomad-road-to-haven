@@ -24,7 +24,7 @@ export interface ShotOpts {
 }
 
 export interface ShotResult {
-  kind: 'none' | 'static' | 'zombie' | 'vehicle' | 'infantry' | 'player';
+  kind: 'none' | 'static' | 'zombie' | 'vehicle' | 'infantry' | 'player' | 'animal';
   x: number;
   y: number;
   z: number;
@@ -32,7 +32,7 @@ export interface ShotResult {
   killed: boolean;
 }
 
-const RAY_FILTER = groups(0xffff, G.STATIC | G.VEHICLE | G.BUILD);
+const RAY_FILTER = groups(0xffff, G.STATIC | G.VEHICLE | G.BUILD | G.FURN);
 
 export class Combat {
   constructor(private ctx: Ctx) {}
@@ -56,6 +56,10 @@ export class Combat {
     this.ctx.zombies.forEachNear(ox, oz, 70, (zb) => {
       if (zb.dead) return;
       consider(zb.x, zb.y + 1.2 * zb.def.scale, zb.z);
+    });
+    // Hunters that have turned on someone are worth aiming at; grazing deer are not.
+    this.ctx.wildlife.forEachNear(ox, oz, 70, (a) => {
+      if (a.chasing && !a.flying) consider(a.x, a.y + a.height * 0.6, a.z);
     });
     this.ctx.raiders.forEachTarget(ox, oz, 80, (x, y, z) => consider(x, y, z));
     if (!best) return [dx, dy, dz];
@@ -133,7 +137,17 @@ export class Combat {
       const inf = ctx.raiders.infantryRayTest(ox, oy, oz, dx, dy, dz, maxD);
       let id = Infinity;
       if (inf) id = inf.dist;
-      if (z && zd <= id && zd < res.dist) {
+      const an = ctx.wildlife.rayTest(ox, oy, oz, dx, dy, dz, maxD);
+      const ad = an ? an.dist : Infinity;
+      if (an && ad < zd && ad <= id && ad < res.dist) {
+        res.kind = 'animal';
+        res.dist = ad;
+        res.x = ox + dx * ad;
+        res.y = oy + dy * ad;
+        res.z = oz + dz * ad;
+        res.killed = ctx.wildlife.damage(an.animal, o.damage * (1 - an.animal.def.armor * (1 - (o.pierce ?? 0))), { fromX: ox, fromZ: oz, killer: o.owner?.index ?? -1 });
+        ctx.fx.blood(res.x, res.y, res.z, 3);
+      } else if (z && zd <= id && zd < res.dist) {
         res.kind = 'zombie';
         res.dist = zd;
         res.x = ox + dx * zd;
@@ -221,6 +235,7 @@ export class Combat {
     ctx.sig.emit(x, z, 100, 'noise');
     for (const p of ctx.players) p.cam.addShake(Math.max(0, 0.9 - Math.hypot(p.pos.x - x, p.pos.z - z) / (radius * 4)));
     ctx.zombies.blast(x, z, radius, damage, o.owner?.index ?? -1);
+    ctx.wildlife.blast(x, z, radius, damage, o.owner?.index ?? -1);
     ctx.raiders.blast(x, z, radius, damage, o.owner?.index ?? -1, o.side !== 'raider');
     for (const v of ctx.vehicles) {
       if (v.wreck) continue;

@@ -53,6 +53,11 @@ export class Zombie {
   wireDps = 0;
   hesitating = false;
   active = false;
+  /** Heading for a doorway because a wall is in the way. */
+  routeT = 0;
+  routeX = 0;
+  routeZ = 0;
+  routeCool = 0;
 
   constructor(
     public kind: ZombieKind,
@@ -83,6 +88,21 @@ export class Zombie {
   }
 }
 
+/** A building the dead can walk into: its footprint and the doorways at ground level. */
+export interface DoorBuilding {
+  x0: number;
+  x1: number;
+  z0: number;
+  z1: number;
+  /** Doorway centres and the unit normal of the wall they are in. */
+  doors: { x: number; z: number; nx: number; nz: number }[];
+  /** A point a stride to each side of every doorway, and distances between those that can see each other (built on first use). */
+  nodes?: { x: number; z: number; door: number }[];
+  adj?: number[][];
+}
+
+const NO_FURNITURE = new Set(['furniture']);
+
 export interface SporeCloud {
   x: number;
   z: number;
@@ -99,6 +119,8 @@ export class ZombieSystem {
   onObstacleHit: (a: Aabb, dmg: number, z: Zombie) => void = () => {};
   /** In camp raids, where unaware attackers head. */
   raidTarget: { x: number; z: number } | null = null;
+  /** Set by the leg scene: ground-floor doorways of every building. */
+  buildings: DoorBuilding[] = [];
   private cascadeT = 0;
   private cascadeTold = false;
   private grid = new Map<number, Zombie[]>();
@@ -322,9 +344,11 @@ export class ZombieSystem {
     if (sp < 3.2 || v.wreck) return;
     const [fx, , fz] = v.body.forward();
     const p = v.position;
-    const w = v.def.width / 2 + 0.45;
+    // A bull bar or dozer blade sweeps wider, hits harder and costs far less speed per zombie.
+    const pl = v.stats.plow;
+    const w = v.def.width / 2 + 0.45 + pl * 0.5;
     const front = v.def.length / 2;
-    const loss = ENEMIES.zombieRules.tierSpeedLoss[Math.min(4, v.def.tier - 1)];
+    const loss = ENEMIES.zombieRules.tierSpeedLoss[Math.min(4, v.def.tier - 1)] * (1 - Math.min(0.7, pl * 0.9));
     let hits = 0;
     for (const zb of this.list) {
       if (zb.dead) continue;
@@ -334,7 +358,7 @@ export class ZombieSystem {
       const lz = rx * fx + rz * fz;
       const lx = rx * fz - rz * fx;
       if (lz < front - 1.1 || lz > front + 1.5 || Math.abs(lx) > w + zb.def.radius) continue;
-      const dmg = (22 + sp * 6.5) * (v.def.tier >= 3 ? 1.5 : v.def.tier === 2 ? 1.0 : 0.65);
+      const dmg = (22 + sp * 6.5) * (v.def.tier >= 3 ? 1.5 : v.def.tier === 2 ? 1.0 : 0.65) * (1 + pl);
       const res = zb.def.armor > 0 ? 1 - zb.def.armor : 1;
       const killed = this.damage(zb, dmg * res, { fromX: p.x, fromZ: p.z, killer: v.driver?.isPlayer ? v.driver.index : -1, explosive: false });
       zb.vx += fx * sp * 0.6 - fz * lx * 0.3;
@@ -474,6 +498,103 @@ export class ZombieSystem {
     return src;
   }
 
+  /**
+   * Walls stop a straight walk. When one is in the way, search the building's doorways (they can see each other
+   * through the plan) for the shortest way to the target and head for the first of them, then ask again from there.
+   */
+  private route(zb: Zombie, dt: number) {
+    const ctx = this.ctx;
+    if (zb.routeT > 0) {
+      zb.routeT -= dt;
+      if (Math.hypot(zb.routeX - zb.x, zb.routeZ - zb.z) < 0.4) {
+        // Arrived: pick the next hop at once, not after a stretch of walking straight into the wall.
+        zb.routeT = 0;
+        zb.routeCool = 0;
+      } else return;
+    }
+    zb.routeCool -= dt;
+    if (zb.routeCool > 0) return;
+    zb.routeCool = 0.3 + Math.random() * 0.15;
+    const ax = zb.x;
+    const az = zb.z;
+    const bx = zb.tx;
+    const bz = zb.tz;
+    const mx = Math.min(ax, bx) - 3;
+    const Mx = Math.max(ax, bx) + 3;
+    const mz = Math.min(az, bz) - 3;
+    const Mz = Math.max(az, bz) + 3;
+    // Furniture slows the dead down but doesn't set their course; walls do.
+    const blocked = (x0: number, z0: number, x1: number, z1: number) => ctx.obs.segmentBlocked(x0, z0, x1, z1, 0.5, NO_FURNITURE);
+    let direct: boolean | null = null;
+    let best: { x: number; z: number } | null = null;
+    let bestCost = Infinity;
+    for (const b of this.buildings) {
+      if (b.x1 < mx || b.x0 > Mx || b.z1 < mz || b.z0 > Mz) continue;
+      if (direct === null) direct = !blocked(ax, az, bx, bz);
+      if (direct) return;
+      if (!b.doors.length) continue;
+      if (!b.nodes || !b.adj) {
+        const nodes: { x: number; z: number; door: number }[] = [];
+        b.doors.forEach((d, k) => {
+          nodes.push({ x: d.x - d.nx * 0.75, z: d.z - d.nz * 0.75, door: k }, { x: d.x + d.nx * 0.75, z: d.z + d.nz * 0.75, door: k });
+        });
+        b.nodes = nodes;
+        b.adj = nodes.map((p, i) =>
+          nodes.map((q, j) => {
+            if (i === j) return 0;
+            // The two sides of one doorway are joined by walking through it.
+            if (p.door === q.door) return 1.5;
+            return !blocked(p.x, p.z, q.x, q.z) ? Math.hypot(p.x - q.x, p.z - q.z) : Infinity;
+          }),
+        );
+      }
+      const nodes = b.nodes;
+      const n = nodes.length;
+      const dist = new Array<number>(n).fill(Infinity);
+      const first = new Array<number>(n).fill(-1);
+      for (let i = 0; i < n; i++) {
+        const d = nodes[i];
+        // Not the point already underfoot.
+        if (Math.hypot(d.x - ax, d.z - az) < 0.5) continue;
+        if (!blocked(ax, az, d.x, d.z)) {
+          dist[i] = Math.hypot(d.x - ax, d.z - az);
+          first[i] = i;
+        }
+      }
+      for (let pass = 0; pass < n; pass++) {
+        let changed = false;
+        for (let i = 0; i < n; i++) {
+          if (dist[i] === Infinity) continue;
+          for (let j = 0; j < n; j++) {
+            const w = b.adj[i][j];
+            if (w === Infinity || i === j) continue;
+            if (dist[i] + w < dist[j] - 1e-6) {
+              dist[j] = dist[i] + w;
+              first[j] = first[i];
+              changed = true;
+            }
+          }
+        }
+        if (!changed) break;
+      }
+      for (let i = 0; i < n; i++) {
+        if (dist[i] === Infinity) continue;
+        const d = nodes[i];
+        if (blocked(d.x, d.z, bx, bz)) continue;
+        const cost = dist[i] + Math.hypot(bx - d.x, bz - d.z);
+        if (cost < bestCost) {
+          bestCost = cost;
+          best = nodes[first[i]];
+        }
+      }
+    }
+    if (best) {
+      zb.routeX = best.x;
+      zb.routeZ = best.z;
+      zb.routeT = 6;
+    }
+  }
+
   private step(zb: Zombie, dt: number) {
     const ctx = this.ctx;
     const def = zb.def;
@@ -518,8 +639,17 @@ export class ZombieSystem {
       }
       if (zb.hesitating) speed *= 0.12;
       if (zb.hasTarget && speed > 0) {
-        const dx = zb.tx - zb.x;
-        const dz = zb.tz - zb.z;
+        let aimX = zb.tx;
+        let aimZ = zb.tz;
+        if (this.buildings.length) {
+          this.route(zb, dt);
+          if (zb.routeT > 0) {
+            aimX = zb.routeX;
+            aimZ = zb.routeZ;
+          }
+        }
+        const dx = aimX - zb.x;
+        const dz = aimZ - zb.z;
         const d = Math.hypot(dx, dz);
         if (d > 0.4) {
           wantX = dx / d;
@@ -564,7 +694,20 @@ export class ZombieSystem {
     zb.vz = damp(zb.vz, wantZ * sp, 8, dt);
     // knockback decays naturally via damping above.
     const p = { x: zb.x + zb.vx * dt + sepX * 0.5, z: zb.z + zb.vz * dt + sepZ * 0.5 };
-    const hit = ctx.obs.resolveCircle(p, def.radius);
+    // The dead do not swim: deep water stops them at the shore, shallows slow them.
+    const wet = ctx.waterAt(p.x, p.z);
+    if (wet) {
+      if (wet.depth > 1.0) {
+        p.x = zb.x;
+        p.z = zb.z;
+        zb.vx *= 0.3;
+        zb.vz *= 0.3;
+      } else if (wet.depth > 0.25) {
+        zb.vx *= 0.9;
+        zb.vz *= 0.9;
+      }
+    }
+    const hit = ctx.obs.resolveCircle(p, def.radius, undefined, ctx.groundAt(zb.x, zb.z));
     zb.x = p.x;
     zb.z = p.z;
     zb.slow = 1;

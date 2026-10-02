@@ -1,0 +1,308 @@
+{
+  "slots": ["engine", "wheels", "armor", "weapon", "utility", "front", "roof", "rear", "side"],
+  "labels": {
+    "engine": "Engine",
+    "wheels": "Tyres",
+    "armor": "Armour",
+    "weapon": "Weapon mount",
+    "utility": "Fuel & cargo",
+    "front": "Front bumper",
+    "roof": "Roof",
+    "rear": "Rear",
+    "side": "Sides"
+  },
+  "rarity": { "1": "Common", "2": "Uncommon", "3": "Rare" },
+  "stockCondition": 0.45,
+  "parts": [
+    {
+      "id": "eng_i4",
+      "slot": "engine",
+      "mk": 1,
+      "name": "Rebuilt Inline-4",
+      "blurb": "Honest iron. A bit more shove, a bit more noise.",
+      "stats": { "force": 0.08, "top": 0.04, "burn": 0.0 },
+      "cost": { "parts": 10, "scrap": 15 },
+      "weight": 14
+    },
+    {
+      "id": "eng_v6",
+      "slot": "engine",
+      "mk": 2,
+      "name": "Tuned V6",
+      "blurb": "Ported heads and a freer exhaust.",
+      "stats": { "force": 0.17, "top": 0.08, "burn": 0.1, "sig": 0.05 },
+      "cost": { "parts": 20, "scrap": 30, "tech": 5 },
+      "weight": 7
+    },
+    {
+      "id": "eng_v8",
+      "slot": "engine",
+      "mk": 3,
+      "name": "Supercharged V8",
+      "blurb": "Thirsty, deafening, and fast. Raiders hear you coming.",
+      "stats": { "force": 0.28, "top": 0.13, "burn": 0.25, "sig": 0.12 },
+      "cost": { "parts": 60, "scrap": 90, "tech": 25 },
+      "weight": 2.5
+    },
+    {
+      "id": "whl_road",
+      "slot": "wheels",
+      "mk": 1,
+      "name": "Patched Road Tyres",
+      "blurb": "Retreads with fresh sidewalls. Better on tarmac.",
+      "stats": { "grip": 0.06, "travel": 0.1 },
+      "cost": { "parts": 10, "scrap": 15 },
+      "weight": 14
+    },
+    {
+      "id": "whl_mt",
+      "slot": "wheels",
+      "mk": 2,
+      "name": "Mud-Terrain Set",
+      "blurb": "Deep lugs that bite into sand and mud.",
+      "stats": { "grip": 0.1, "travel": 0.16, "offroad": 0.2 },
+      "cost": { "parts": 20, "scrap": 30, "tech": 5 },
+      "weight": 7
+    },
+    {
+      "id": "whl_bl",
+      "slot": "wheels",
+      "mk": 3,
+      "name": "Beadlock Crawlers",
+      "blurb": "Wide bolted rims on soft sidewalls. Goes anywhere.",
+      "stats": { "grip": 0.14, "travel": 0.24, "offroad": 0.36 },
+      "cost": { "parts": 60, "scrap": 90, "tech": 25 },
+      "weight": 2.5
+    },
+    {
+      "id": "arm_sheet",
+      "slot": "armor",
+      "mk": 1,
+      "name": "Sheet-Metal Plating",
+      "blurb": "Roofing tin, riveted over the doors.",
+      "stats": { "armor": 0.05 },
+      "cost": { "parts": 10, "scrap": 15 },
+      "weight": 14
+    },
+    {
+      "id": "arm_weld",
+      "slot": "armor",
+      "mk": 2,
+      "name": "Welded Plate Kit",
+      "blurb": "Cut road-sign steel welded into a proper shell.",
+      "stats": { "armor": 0.1, "hp": 0.05, "top": -0.01 },
+      "cost": { "parts": 20, "scrap": 30, "tech": 5 },
+      "weight": 7
+    },
+    {
+      "id": "arm_ceramic",
+      "slot": "armor",
+      "mk": 3,
+      "name": "Ceramic Composite Plates",
+      "blurb": "Pre-war armour tiles. Heavy and very hard to find.",
+      "stats": { "armor": 0.16, "hp": 0.1, "top": -0.02, "burn": 0.05 },
+      "cost": { "parts": 60, "scrap": 90, "tech": 25 },
+      "weight": 2.5
+    },
+    {
+      "id": "wpn_lmg",
+      "slot": "weapon",
+      "mk": 1,
+      "name": "Scrap LMG Mount",
+      "blurb": "A light machine gun on a welded post.",
+      "stats": { "dmg": 0.15 },
+      "cost": { "parts": 10, "scrap": 15 },
+      "weight": 12
+    },
+    {
+      "id": "wpn_twin",
+      "slot": "weapon",
+      "mk": 2,
+      "name": "Twin LMG Mount",
+      "blurb": "Two barrels, one trigger.",
+      "stats": { "dmg": 0.35, "rate": 0.1 },
+      "cost": { "parts": 20, "scrap": 30, "tech": 5 },
+      "weight": 6
+    },
+    {
+      "id": "wpn_hmg",
+      "slot": "weapon",
+      "mk": 3,
+      "name": "Heavy MG Mount",
+      "blurb": "A heavy machine gun that chews through armour.",
+      "stats": { "dmg": 0.6, "rate": 0.2 },
+      "cost": { "parts": 60, "scrap": 90, "tech": 25 },
+      "weight": 2
+    },
+    {
+      "id": "utl_rack",
+      "slot": "utility",
+      "mk": 1,
+      "name": "Jerry-Can Rack",
+      "blurb": "Straps for four extra cans, and room for loot.",
+      "stats": { "tank": 0.2, "cargo": 2 },
+      "cost": { "parts": 10, "scrap": 15 },
+      "weight": 13
+    },
+    {
+      "id": "utl_tank",
+      "slot": "utility",
+      "mk": 2,
+      "name": "Long-Range Tank",
+      "blurb": "A second tank plumbed in beside the first.",
+      "stats": { "tank": 0.4, "cargo": 3 },
+      "cost": { "parts": 20, "scrap": 30, "tech": 5 },
+      "weight": 7
+    },
+    {
+      "id": "utl_aux",
+      "slot": "utility",
+      "mk": 3,
+      "name": "Auxiliary Tank Bank",
+      "blurb": "Tanks wherever they fit. Long way between pumps.",
+      "stats": { "tank": 0.65, "cargo": 5, "top": -0.01 },
+      "cost": { "parts": 60, "scrap": 90, "tech": 25 },
+      "weight": 2.5
+    },
+    {
+      "id": "fr_bull",
+      "slot": "front",
+      "mk": 1,
+      "name": "Bull Bar",
+      "blurb": "Steel tube bumper. Parts zombies and shrugs off knocks.",
+      "stats": { "plow": 0.2, "armorF": 0.08 },
+      "cost": { "parts": 8, "scrap": 12 },
+      "weight": 12
+    },
+    {
+      "id": "fr_blade",
+      "slot": "front",
+      "mk": 2,
+      "name": "Dozer Blade",
+      "blurb": "A scavenged plough blade. Slows you down, clears the road.",
+      "stats": { "plow": 0.55, "armorF": 0.14, "top": -0.04 },
+      "cost": { "parts": 16, "scrap": 24, "tech": 3 },
+      "weight": 5
+    },
+    {
+      "id": "fr_spike",
+      "slot": "front",
+      "mk": 2,
+      "name": "Spiked Ram",
+      "blurb": "Welded spikes. Nobody likes being hit by it.",
+      "stats": { "plow": 0.4, "armorF": 0.06, "ram": 0.4 },
+      "cost": { "parts": 16, "scrap": 24, "tech": 3 },
+      "weight": 5
+    },
+    {
+      "id": "rf_rack",
+      "slot": "roof",
+      "mk": 1,
+      "name": "Roof Rack",
+      "blurb": "Rails for gear. Carries more, holds a little fuel.",
+      "stats": { "cargo": 4, "tank": 0.1 },
+      "cost": { "parts": 8, "scrap": 12 },
+      "weight": 12
+    },
+    {
+      "id": "rf_light",
+      "slot": "roof",
+      "mk": 1,
+      "name": "Light Bar",
+      "blurb": "A row of spotlights. Night driving becomes possible.",
+      "stats": { "light": 0.7 },
+      "cost": { "parts": 8, "scrap": 12 },
+      "weight": 10
+    },
+    {
+      "id": "rf_cage",
+      "slot": "roof",
+      "mk": 2,
+      "name": "Roll Cage",
+      "blurb": "Tube cage over the cab. Rolls hurt less.",
+      "stats": { "armor": 0.03, "hp": 0.06 },
+      "cost": { "parts": 16, "scrap": 24, "tech": 3 },
+      "weight": 5
+    },
+    {
+      "id": "rr_spare",
+      "slot": "rear",
+      "mk": 1,
+      "name": "Spare Wheel Carrier",
+      "blurb": "A spare on the back. Flat tyres are a quick swap.",
+      "stats": { "spare": 1 },
+      "cost": { "parts": 8, "scrap": 12 },
+      "weight": 12
+    },
+    {
+      "id": "rr_wing",
+      "slot": "rear",
+      "mk": 1,
+      "name": "Wing Spoiler",
+      "blurb": "Bolted-on downforce. Mostly for show, a little for grip.",
+      "stats": { "top": 0.03, "grip": 0.04 },
+      "cost": { "parts": 8, "scrap": 12 },
+      "weight": 8
+    },
+    {
+      "id": "rr_box",
+      "slot": "rear",
+      "mk": 2,
+      "name": "Cargo Box",
+      "blurb": "A lockable box over the tail. Fits a lot of salvage.",
+      "stats": { "cargo": 8 },
+      "cost": { "parts": 16, "scrap": 24, "tech": 3 },
+      "weight": 6
+    },
+    {
+      "id": "sd_skirt",
+      "slot": "side",
+      "mk": 1,
+      "name": "Rock Sliders",
+      "blurb": "Steel rails along the sills.",
+      "stats": { "armorS": 0.06 },
+      "cost": { "parts": 8, "scrap": 12 },
+      "weight": 11
+    },
+    {
+      "id": "sd_plate",
+      "slot": "side",
+      "mk": 2,
+      "name": "Welded Side Plates",
+      "blurb": "Doors and flanks plated over.",
+      "stats": { "armorS": 0.12, "armorR": 0.04, "top": -0.02 },
+      "cost": { "parts": 16, "scrap": 24, "tech": 3 },
+      "weight": 5
+    },
+    {
+      "id": "sd_pipes",
+      "slot": "side",
+      "mk": 1,
+      "name": "Side Pipes",
+      "blurb": "Open headers. More breath, much more noise.",
+      "stats": { "force": 0.04, "sig": 0.08 },
+      "cost": { "parts": 8, "scrap": 12 },
+      "weight": 8
+    }
+  ],
+  "paints": [
+    { "id": "rust", "name": "Rust Orange", "c": 12083246 },
+    { "id": "sand", "name": "Dune Sand", "c": 13218180 },
+    { "id": "olive", "name": "Army Olive", "c": 6056766 },
+    { "id": "slate", "name": "Slate Blue", "c": 5073538 },
+    { "id": "bone", "name": "Bone White", "c": 14209728 },
+    { "id": "oxide", "name": "Oxide Red", "c": 9187110 },
+    { "id": "pitch", "name": "Pitch Black", "c": 2302755 },
+    { "id": "teal", "name": "Faded Teal", "c": 4164228 },
+    { "id": "mustard", "name": "Mustard", "c": 13606699 },
+    { "id": "plum", "name": "Dusk Plum", "c": 6175327 },
+    { "id": "steel", "name": "Gunmetal", "c": 6975608 },
+    { "id": "hazard", "name": "Hazard Yellow", "c": 14728730 }
+  ],
+  "stripes": [
+    { "id": "none", "name": "Plain" },
+    { "id": "racing", "name": "Racing stripe" },
+    { "id": "two", "name": "Two-tone roof" },
+    { "id": "hazard", "name": "Hazard flank" }
+  ]
+}

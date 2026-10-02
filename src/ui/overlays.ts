@@ -1,8 +1,10 @@
 import { ENCOUNTERS, LEGS, STRUCTURES, encounterById, t, type LegDef } from '../data';
 import { FocusUI, type FocusItem } from './focus';
 import { LedgerPanel } from './ledger';
+import { ControlsMenu } from './controls';
+import { PROMPT_ACTION, keyLabel, padLabel, padPhysical, viewSharesVehicle, type KeyMap } from '../input/bindings';
 import { escapeHtml } from './hud';
-import { hasSave, initSave } from '../save/save';
+import { hasSave, initSave, savedSolo } from '../save/save';
 import { Btn, wasPressed } from '../input/intents';
 import { resolveEffects, resolveVote, type ResolvedEffects } from '../sim/endings';
 import { Rng } from '../core/rng';
@@ -81,48 +83,64 @@ export class Overlays {
 
   private renderTitle() {
     const g = this.game;
+    const solo = g.solo;
     const slotHtml = (i: number) => {
       const s = g.input.slots[i];
       const joined = !!s;
       const dev = s ? (s.kind === 'pad' ? `GAMEPAD ${s.index + 1}` : `KEYBOARD ${s.set === 1 ? 'WASD' : 'ARROWS'}`) : '';
+      const join = i === 0 ? (solo ? t('title.joinSolo') : t('title.joinKb1')) : t('title.joinKb2');
       return `<div class="slot p${i + 1} ${joined ? 'joined' : ''}">
-        <div class="who" style="color:${PLAYER_CSS[i]}">PLAYER ${i + 1}</div>
-        ${
-          joined
-            ? `<div>${dev}</div>`
-            : `<div class="blink">${i === 0 ? t('title.join') : t('title.join')}</div><div class="hint">${i === 0 ? t('title.joinKb1') : t('title.joinKb2')}</div>`
-        }
+        <div class="who" style="color:${PLAYER_CSS[i]}">${solo ? 'SOLO' : `PLAYER ${i + 1}`}</div>
+        ${joined ? `<div>${dev}</div>` : `<div class="blink">${t('title.join')}</div><div class="hint">${join}</div>`}
         <div style="margin-top:8px"><button data-fid="name${i}">‹ ${this.callsign(i)} ›</button></div>
       </div>`;
     };
+    const saved = hasSave() ? ` <small>${savedSolo() ? 'solo' : '2P'}</small>` : '';
     this.root.innerHTML = `
       <div class="title-screen"><div>
         <h1>${t('title.name')}</h1><h2>${t('title.sub')}</h2>
-        <p>${t('title.tag')}</p>
-        <div class="slots">${slotHtml(0)}${slotHtml(1)}</div>
+        <p>${solo ? t('title.tagSolo') : t('title.tag')}</p>
+        <div class="btnrow" style="margin-bottom:14px"><button data-fid="mode">Players: ${solo ? '‹ 1 · SOLO ›' : '‹ 2 · SPLIT SCREEN ›'}</button></div>
+        <div class="slots">${slotHtml(0)}${solo ? '' : slotHtml(1)}</div>
         <div class="btnrow" style="margin-top:22px">
           <button data-fid="new">New convoy</button>
-          <button data-fid="cont" ${hasSave() ? '' : 'disabled'}>Continue</button>
+          <button data-fid="cont" ${hasSave() ? '' : 'disabled'}>Continue${saved}</button>
           <button data-fid="set">Settings</button>
+          <button data-fid="ctl">Control settings</button>
           <button data-fid="how">Controls</button>
         </div>
-        <p style="font-size:.78em;margin-top:18px">Two players, one screen. Plug in two gamepads and press A, or share the keyboard. Chrome or Edge recommended; gamepads need localhost or HTTPS.</p>
+        <p style="font-size:.78em;margin-top:18px">${solo ? 'One player, full screen. Plug in a gamepad and press A, or use the keyboard (WASD with F, or the arrow keys with Right Shift).' : 'Two players, one screen. Plug in two gamepads and press A, or share the keyboard.'} Chrome or Edge recommended; gamepads need localhost or HTTPS.</p>
         ${g.input.nonStandard.size ? '<p style="color:var(--amber)">A controller without the standard mapping was detected. Controls may be wrong.</p>' : ''}
       </div></div>`;
     const el = (k: string) => this.root.querySelector<HTMLElement>(`[data-fid="${k}"]`)!;
     const items: FocusItem[] = [
+      { el: el('mode'), press: () => this.titleLock <= 0 && this.toggleSolo() },
       { el: el('name0'), press: () => this.titleLock <= 0 && this.cycleName(0) },
-      { el: el('name1'), press: () => this.titleLock <= 0 && this.cycleName(1) },
+      ...(solo ? [] : [{ el: el('name1'), press: () => this.titleLock <= 0 && this.cycleName(1) }]),
       { el: el('new'), press: () => this.titleLock <= 0 && g.startNewGame() },
       { el: el('cont'), press: () => this.titleLock <= 0 && g.continueGame(), disabled: !hasSave() },
       { el: el('set'), press: () => this.titleLock <= 0 && this.showSettings(() => this.showTitle()) },
+      { el: el('ctl'), press: () => this.titleLock <= 0 && this.showControlSettings(() => this.showTitle()) },
       { el: el('how'), press: () => this.titleLock <= 0 && this.showControls(() => this.showTitle()) },
     ];
     g.focus.setItems(items);
-    g.focus.cursor = [2, 2];
+    const start = items.findIndex((i) => i.el === el('new'));
+    g.focus.cursor = [start, start];
     g.focus.active = true;
     this.titleReady = true;
     this.root.querySelectorAll<HTMLElement>('.title-screen button').forEach((b) => (b.style.pointerEvents = 'auto'));
+  }
+
+  /** Solo or split screen. The demo behind the menu restarts to match. */
+  private toggleSolo() {
+    const g = this.game;
+    g.setSolo(!g.solo);
+    g.saveSettings();
+    g.audio.play('click');
+    g.restartAttract();
+    this.renderTitle();
+    // Stay on the Players button.
+    g.focus.cursor = [0, 0];
   }
 
   private cycleName(i: number) {
@@ -158,6 +176,7 @@ export class Overlays {
     const g = this.game;
     const wasPausedOverlay = g.paused;
     const host = wasPausedOverlay ? this.pauseEl! : this.root;
+    const solo = g.solo;
     const render = () => {
       const s = g.input.settings;
       const row = (id: string, label: string, val: string) =>
@@ -166,17 +185,18 @@ export class Overlays {
       host.innerHTML = `<div class="menu" style="min-width:640px"><h2>Settings</h2><div class="list">
         ${row('q', 'Graphics preset', g.R.quality.toUpperCase())}
         ${row('ui', 'UI scale', `${Math.round(g.hud.uiScale * 100)}%`)}
-        ${row('lay', 'Split screen', g.R.layout === 'horizontal' ? 'TOP / BOTTOM' : 'LEFT / RIGHT')}
+        ${solo ? '' : row('lay', 'Split screen', g.R.layout === 'horizontal' ? 'TOP / BOTTOM' : 'LEFT / RIGHT')}
         ${row('vol', 'Master volume', `${Math.round(g.audio.volume * 100)}%`)}
         ${row('mus', 'Music volume', `${Math.round(g.audio.musicVolume * 100)}%`)}
-        ${row('rm1', 'P1 rumble', s.rumble[0] ? 'ON' : 'OFF')}
-        ${row('rm2', 'P2 rumble', s.rumble[1] ? 'ON' : 'OFF')}
-        ${row('aa1', 'P1 aim assist', `${Math.round(s.aimAssist[0] * 100)}%`)}
-        ${row('aa2', 'P2 aim assist', `${Math.round(s.aimAssist[1] * 100)}%`)}
+        ${row('rm1', solo ? 'Rumble' : 'P1 rumble', s.rumble[0] ? 'ON' : 'OFF')}
+        ${solo ? '' : row('rm2', 'P2 rumble', s.rumble[1] ? 'ON' : 'OFF')}
+        ${row('aa1', solo ? 'Aim assist' : 'P1 aim assist', `${Math.round(s.aimAssist[0] * 100)}%`)}
+        ${solo ? '' : row('aa2', 'P2 aim assist', `${Math.round(s.aimAssist[1] * 100)}%`)}
+        ${row('ms', 'Mouse / trackpad sensitivity', `${Math.round(s.mouseSens * 100)}%`)}
         ${row('dr', 'Drain (fuel, food)', `${d.drain.toFixed(2)}×`)}
         ${row('ag', 'Aggro (enemy senses)', `${d.aggro.toFixed(2)}×`)}
         ${row('dm', 'Damage taken', `${d.damage.toFixed(2)}×`)}
-        <div class="item"><button data-fid="back">Back</button><span class="mutedtxt" style="color:#c9bd9f">Per-player options apply to that seat.</span></div>
+        <div class="item"><button data-fid="back">Back</button><span class="mutedtxt" style="color:#c9bd9f">${solo ? '' : 'Per-player options apply to that seat.'}</span></div>
       </div></div>`;
       (host.querySelectorAll('.menu button') as NodeListOf<HTMLElement>).forEach((b) => (b.style.pointerEvents = 'auto'));
       const el = (k: string) => host.querySelector<HTMLElement>(`[data-fid="${k}"]`)!;
@@ -214,6 +234,9 @@ export class Overlays {
           case 'aa2':
             st.aimAssist[1] = clamp(Math.round((st.aimAssist[1] + dir * 0.25) * 100) / 100, 0, 2);
             break;
+          case 'ms':
+            st.mouseSens = clamp(Math.round((st.mouseSens + dir * 0.1) * 100) / 100, 0.2, 3);
+            break;
           case 'dr':
             dd.drain = clamp(Math.round((dd.drain + dir * 0.25) * 100) / 100, 0.25, 2);
             break;
@@ -230,7 +253,7 @@ export class Overlays {
         render();
         fc.setItems(makeItems(), keys);
       };
-      const ids = ['q', 'ui', 'lay', 'vol', 'mus', 'rm1', 'rm2', 'aa1', 'aa2', 'dr', 'ag', 'dm'];
+      const ids = ['q', 'ui', ...(solo ? [] : ['lay']), 'vol', 'mus', 'rm1', ...(solo ? [] : ['rm2']), 'aa1', ...(solo ? [] : ['aa2']), 'ms', 'dr', 'ag', 'dm'];
       const makeItems = (): FocusItem[] => [
         ...ids.flatMap((id) => [
           { el: el(`${id}-`), press: () => step(id, -1) },
@@ -253,30 +276,55 @@ export class Overlays {
     render();
   }
 
+  private controlsMenu: ControlsMenu | null = null;
+
+  /** Rebind every action and set the look and camera options. */
+  showControlSettings(back: () => void) {
+    const g = this.game;
+    const paused = g.paused;
+    (this.controlsMenu ??= new ControlsMenu(g)).show(paused ? this.pauseEl! : this.root, paused ? this.pauseFocus : g.focus, back);
+  }
+
+  /** The controls reference, written from the bindings in force rather than the defaults. */
   showControls(back: () => void) {
     const g = this.game;
     const wasPausedOverlay = g.paused;
     const host = wasPausedOverlay ? this.pauseEl! : this.root;
+    const b = g.input.settings.bindings;
+    const pad = (id: keyof typeof PROMPT_ACTION | 'wheel' | 'sheet' | 'view') => {
+      const action = id === 'wheel' || id === 'sheet' || id === 'view' ? id : PROMPT_ACTION[id];
+      if (action === 'view' && b.pad.view === -2) return `${padLabel(b.pad.vehicle)} tap`;
+      if (action === 'vehicle' && viewSharesVehicle(b.pad)) return `${padLabel(b.pad.vehicle)} hold`;
+      return padLabel(padPhysical(b.pad, action));
+    };
+    const pair = (a: string, c: string) => `${pad(a as 'A')} / ${pad(c as 'A')}`;
     const rows: [string, string, string, string, string][] = [
-      ['', 'On foot', 'Driving', 'Gunner (T3 bed)', 'Camp build'],
+      ['', 'On foot', 'Driving', 'Gunner / passenger', 'Camp build'],
       ['Left stick', 'Move', 'Steer', 'Lean', 'Move'],
       ['Right stick', 'Aim / look', 'Free look', 'Aim gun', 'Aim reticle'],
-      ['RT / LT', 'Fire / aim', 'Throttle / brake', 'Fire / zoom', 'Place / remove'],
-      ['RB', 'Tap melee · hold takedown', 'Fire front gun', 'Fire', 'Next element'],
-      ['LB', 'Swap tool', '—', 'Swap weapon', 'Previous element'],
-      ['A', 'Interact · hold to loot, repair, refuel, revive', 'Handbrake', 'Reload', 'Rotate'],
-      ['B', 'Crouch', 'Tap lights · hold engine off', 'Cancel', 'Cancel'],
-      ['X', 'Reload · hold swap utility', 'Tap horn · hold siren', 'Reload', 'Watch post'],
-      ['Y', 'Enter vehicle · hold bail out', 'Tap exit · hold bail', 'Exit', 'Build wheel'],
+      [pair('RT', 'LT'), 'Fire / aim', 'Throttle / brake', 'Fire / zoom', 'Place / remove'],
+      [pad('RB'), 'Tap melee · hold takedown', 'Fire front gun', 'Fire', 'Next element'],
+      [pad('LB'), 'Swap tool: gun, wrench (repair), crowbar (strip parts), jerrycan (fuel)', '—', 'Swap weapon', 'Previous element'],
+      [pad('A'), 'Interact · hold to loot, repair, strip, siphon, refuel, revive', 'Handbrake', 'Reload', 'Rotate'],
+      [pad('B'), 'Crouch', 'Tap lights · hold engine off', 'Cancel', 'Cancel'],
+      [pad('X'), 'Reload · hold swap utility · wrench: workbench', 'Tap horn · hold siren', 'Reload', 'Watch post'],
+      [pad('Y'), 'Enter any vehicle (abandoned cars become yours) · hold bail out', 'Exit · hold to bail at speed', 'Exit', 'Build wheel'],
+      [pad('view'), 'Switch first / third person', 'Same: look from the cab', 'Same: look along the gun', '—'],
       ['D-pad', 'Tap ping · hold command wheel', 'Same', 'Same', 'Same'],
-      ['L3 / R3', 'Sprint / reset cam', 'Camera distance / look back', 'Zoom', 'Snap grid'],
-      ['Start / Back', 'Pause · hold convoy sheet', 'Same', 'Same', 'Same'],
+      [pair('L3', 'R3'), 'Sprint / reset cam', 'Camera distance / look back', 'Zoom', 'Snap grid'],
+      [`Start / ${pad('sheet')}`, 'Pause · hold convoy sheet', 'Same', 'Same', 'Same'],
     ];
+    const kbLine = (set: 0 | 1) => {
+      const m: KeyMap = b.kb[set];
+      const k = (id: keyof KeyMap) => keyLabel(m[id]);
+      return `${set === 0 ? 'P1' : 'P2'}: ${k('moveUp')} ${k('moveLeft')} ${k('moveDown')} ${k('moveRight')} move, ${k('turnLeft')} / ${k('turnRight')} aim, ${k('fire')} fire, ${k('interact')} interact, ${k('vehicle')} vehicle, ${k('view')} first / third person, ${k('crouch')} crouch / lights, ${k('sprint')} sprint / handbrake, ${k('wheel')} wheel, ${k('swap')} swap tool, ${k('prevBuild')} ${k('nextBuild')} cycle build, hold ${k('sheet')} for the convoy sheet`;
+    };
+    const mouse = `fire ${mouseWord(b.mouse.fire)}, aim ${mouseWord(b.mouse.aim)}, view ${mouseWord(b.mouse.view)}`;
     host.innerHTML = `<div class="menu" style="min-width:900px"><h2>Controls</h2>
       <div style="font-size:.74em;display:grid;grid-template-columns:110px 1.5fr 1.1fr 1fr 1fr;gap:3px 12px;text-transform:none;letter-spacing:.01em">
       ${rows.map((r, i) => r.map((c) => `<div style="${i === 0 ? 'color:var(--amber)' : ''}">${c}</div>`).join('')).join('')}
       </div>
-      <p style="font-size:.74em;text-transform:none;letter-spacing:.01em;margin:10px 0">Keyboard · P1: WASD move, Q/E aim, F fire, G interact, R vehicle, C crouch/lights, Shift sprint/handbrake, Tab wheel, V swap tool, Z X cycle build, hold Space for the convoy sheet. P2: Arrows move, [ ] aim, Right Shift fire, / interact, Enter vehicle, . crouch/lights, Right Ctrl sprint/handbrake, Backspace wheel, N swap tool, ; ' cycle build, hold \\ for the convoy sheet. Esc pauses. Keyboard players get stronger aim assist.</p>
+      <p style="font-size:.74em;text-transform:none;letter-spacing:.01em;margin:10px 0">Mouse / trackpad (P1 keyboard seat): click the game to capture the pointer, move to aim, ${mouse}, Esc releases and pauses. Solo: either keyboard layout works. Keyboard · ${kbLine(0)}. ${kbLine(1)}. Esc pauses. Keyboard players get stronger aim assist. Everything here can be changed under Control settings.</p>
       <div class="item"><button data-fid="back">Back</button></div></div>`;
     (host.querySelectorAll('.menu button') as NodeListOf<HTMLElement>).forEach((b) => (b.style.pointerEvents = 'auto'));
     const fc = wasPausedOverlay ? this.pauseFocus : g.focus;
@@ -306,28 +354,34 @@ export class Overlays {
   private renderPause(by: number) {
     const g = this.game;
     const el = this.pauseEl!;
-    const who = by >= 0 ? `Paused by Player ${by + 1}` : 'Paused';
+    const who = by >= 0 && !g.solo ? `Paused by Player ${by + 1}` : 'Paused';
     const dis = g.hud.disconnected;
     const reconnect = dis[0] || dis[1] ? `<p style="color:var(--amber)">${dis[0] ? 'Player 1' : 'Player 2'}'s controller disconnected. Reconnect it or press a key.</p>` : '';
     el.innerHTML = `<div class="menu"><h2>${who}</h2>${reconnect}<div class="list">
       <div class="item"><button data-fid="res">Resume</button></div>
       <div class="item"><button data-fid="set">Settings</button></div>
+      <div class="item"><button data-fid="ctl">Control settings</button></div>
       <div class="item"><button data-fid="how">Controls</button></div>
-      <div class="item"><button data-fid="swap">Swap player seats</button></div>
+      ${g.solo ? '' : '<div class="item"><button data-fid="swap">Swap player seats</button></div>'}
       <div class="item"><button data-fid="quit">Quit to title</button></div></div></div>`;
     (el.querySelectorAll('.menu button') as NodeListOf<HTMLElement>).forEach((b) => (b.style.pointerEvents = 'auto'));
     const q = (k: string) => el.querySelector<HTMLElement>(`[data-fid="${k}"]`)!;
     this.pauseFocus.setItems([
       { el: q('res'), press: () => g.setPause(false, -1) },
       { el: q('set'), press: () => this.showSettings(() => this.renderPause(by)) },
+      { el: q('ctl'), press: () => this.showControlSettings(() => this.renderPause(by)) },
       { el: q('how'), press: () => this.showControls(() => this.renderPause(by)) },
-      {
-        el: q('swap'),
-        press: () => {
-          g.input.swapSeats();
-          g.audio.play('confirm');
-        },
-      },
+      ...(g.solo
+        ? []
+        : [
+            {
+              el: q('swap'),
+              press: () => {
+                g.input.swapSeats();
+                g.audio.play('confirm');
+              },
+            },
+          ]),
       { el: q('quit'), press: () => (g.setPause(false, -1), g.toTitle()) },
     ]);
     this.pauseFocus.active = true;
@@ -369,6 +423,7 @@ export class Overlays {
   }) {
     const g = this.game;
     this.clear();
+    const solo = g.campaign.solo;
     const votes: [number, number] = [-1, -1];
     const names = [g.campaign.players[0].name, g.campaign.players[1].name];
     let resolved = false;
@@ -378,11 +433,11 @@ export class Overlays {
         <div class="choices" style="${o.wide ? `grid-template-columns:repeat(${o.choices.length},1fr)` : ''}">${o.choices
           .map(
             (c, i) => `<button class="choice" data-fid="c${i}"><span>${escapeHtml(c.label)}${c.sub ? `<br><span class="mutedtxt">${c.sub}</span>` : ''}</span><span class="votes">${votes
-              .map((v, p) => (v === i ? `<span class="vote p${p + 1}">${names[p].toUpperCase()}</span>` : ''))
+              .map((v, p) => (v === i && !(solo && p === 1) ? `<span class="vote p${p + 1}">${names[p].toUpperCase()}</span>` : ''))
               .join('')}</span></button>`,
           )
           .join('')}</div>
-        <div class="mutedtxt" style="margin-top:10px">${t('enc.vote')}<br>${t('enc.lead')}: <b style="color:${PLAYER_CSS[o.lead]}">${names[o.lead].toUpperCase()}</b>${o.foot ? `<br>${o.foot}` : ''}</div></div>`;
+        <div class="mutedtxt" style="margin-top:10px">${solo ? t('enc.voteSolo') : `${t('enc.vote')}<br>${t('enc.lead')}: <b style="color:${PLAYER_CSS[o.lead]}">${names[o.lead].toUpperCase()}</b>`}${o.foot ? `<br>${o.foot}` : ''}</div></div>`;
       this.root.querySelectorAll<HTMLElement>('button').forEach((b) => (b.style.pointerEvents = 'auto'));
     };
     const bind = () => {
@@ -391,6 +446,8 @@ export class Overlays {
         press: (p) => {
           if (resolved) return;
           votes[p] = i;
+          // Solo: the one vote is the whole vote.
+          if (solo) votes[1] = i;
           g.audio.play('click');
           const keys = g.focus.keys();
           draw();
@@ -408,7 +465,7 @@ export class Overlays {
       const resText = o.result?.(r.choice) ?? '';
       this.root.innerHTML = `<div class="enc panel paper"><h2>${escapeHtml(o.title)}</h2>
         <div class="choices"><div class="choice mute" style="justify-content:flex-start">${escapeHtml(o.choices[r.choice].label)}</div></div>
-        ${r.overridden ? `<div class="mutedtxt" style="margin-top:8px"><b style="color:${PLAYER_CSS[o.lead]}">${names[o.lead].toUpperCase()}</b> overrode ${names[1 - o.lead]}: -1 Trust.</div>` : '<div class="mutedtxt" style="margin-top:8px">You agreed.</div>'}
+        ${solo ? '' : r.overridden ? `<div class="mutedtxt" style="margin-top:8px"><b style="color:${PLAYER_CSS[o.lead]}">${names[o.lead].toUpperCase()}</b> overrode ${names[1 - o.lead]}: -1 Trust.</div>` : '<div class="mutedtxt" style="margin-top:8px">You agreed.</div>'}
         ${resText ? `<div class="result">${escapeHtml(resText)}</div>` : ''}
         <div class="btnrow" style="margin-top:12px"><button data-fid="go">Continue</button></div></div>`;
       this.root.querySelectorAll<HTMLElement>('button').forEach((b) => (b.style.pointerEvents = 'auto'));
@@ -607,3 +664,5 @@ export class Overlays {
 function selectEndingTitle(e: EndingId) {
   return { openGate: 'an open gate', toll: 'a toll', twoWalked: 'a long walk', warlord: 'a throne', hollow: 'an empty city' }[e];
 }
+
+const mouseWord = (b: number | undefined) => (b === undefined ? 'unbound' : ['left click', 'middle click', 'right click', 'side button 1', 'side button 2'][b] ?? `button ${b + 1}`);

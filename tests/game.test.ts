@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { ObstacleIndex } from '../src/game/obstacles';
 import { Campaign } from '../src/game/campaign';
+import { partDef } from '../src/data';
+import { installPart, newBuild } from '../src/sim/garage';
+import { newPart } from '../src/sim/parts';
 import { newIntent, Btn, isHeld, wasPressed } from '../src/input/intents';
 import { radialDeadzone, wrapAngle, angleDiff, formatClock } from '../src/core/math';
 import { Rng, hash2, noise2 } from '../src/core/rng';
@@ -68,8 +71,14 @@ describe('campaign state', () => {
     c.fragments.add(2);
     c.seenEncounters.add('toll_road');
     c.hire('mechanic', 0.15);
-    c.players[0].tier = 3;
-    c.players[1].mods.engine = 2;
+    const buggy = newBuild('buggy', { seed: 5 });
+    installPart(buggy, newPart('eng_v6', 0.8));
+    c.addVehicle(buggy, 0);
+    const sedan = newBuild('sedan', { seed: 6, paint: 0x336699 });
+    sedan.comp.tires[1] = 0;
+    sedan.hp = 0.4;
+    c.addVehicle(sedan, 1);
+    c.addPart(newPart('whl_mt', 0.7));
     c.axes.mercy = 5;
     const back = Campaign.deserialize(JSON.parse(JSON.stringify(c.serialize())));
     expect(back.seed).toBe(42);
@@ -78,9 +87,75 @@ describe('campaign state', () => {
     expect(back.seenEncounters.has('toll_road')).toBe(true);
     expect(back.crew).toHaveLength(1);
     expect(back.crew[0].cut).toBeCloseTo(0.15);
-    expect(back.players[0].tier).toBe(3);
-    expect(back.players[1].mods.engine).toBe(2);
+    expect(back.buildOf(0).chassis).toBe('buggy');
+    expect(back.buildOf(0).fit.engine?.id).toBe('eng_v6');
+    expect(back.buildOf(0).comp.engine).toBeCloseTo(0.8);
+    expect(back.buildOf(1).chassis).toBe('sedan');
+    expect(back.buildOf(1).paint).toBe(0x336699);
+    expect(back.buildOf(1).comp.tires[1]).toBe(0);
+    expect(back.buildOf(1).hp).toBeCloseTo(0.4);
+    expect(back.garage).toHaveLength(4);
+    expect(back.inventory.map((p) => p.id)).toEqual(['whl_mt']);
     expect(back.axes.mercy).toBe(5);
+  });
+  it('migrates a version 1 save: tier and module levels become a build with the matching parts', () => {
+    const c = new Campaign(['Ash', 'Rook']);
+    const old = JSON.parse(JSON.stringify(c.serialize()));
+    delete old.garage;
+    delete old.inventory;
+    old.v = 1;
+    old.players = [
+      { name: 'Ash', tier: 3, mods: { engine: 2, armor: 1, wheels: 0, weapon: 3, utility: 0 }, hpFrac: 0.6, utility: 'flare', alive: true },
+      { name: 'Rook', tier: 2, mods: { engine: 0, armor: 0, wheels: 0, weapon: 0, utility: 0 }, hpFrac: 1, utility: 'horn', alive: true },
+    ];
+    const back = Campaign.deserialize(old);
+    const a = back.buildOf(0);
+    expect(a.chassis).toBe('buggy');
+    expect(a.hp).toBeCloseTo(0.6);
+    expect(partDef(a.fit.engine!.id).mk).toBe(2);
+    expect(partDef(a.fit.armor!.id).mk).toBe(1);
+    expect(partDef(a.fit.weapon!.id).mk).toBe(3);
+    expect(a.fit.wheels).toBeUndefined();
+    expect(back.buildOf(1).chassis).toBe('quad');
+    expect(back.buildOf(0).uid).not.toBe(back.buildOf(1).uid);
+  });
+  it('drops parts and chassis that no longer exist instead of crashing', () => {
+    const c = new Campaign();
+    const blob = JSON.parse(JSON.stringify(c.serialize()));
+    blob.garage[0].fit = { engine: { uid: 'p1', id: 'does_not_exist', cond: 1 } };
+    blob.inventory = [{ uid: 'p2', id: 'also_missing', cond: 1 }];
+    blob.garage.push({ ...blob.garage[0], uid: 'v99', chassis: 'ghost_car' });
+    const back = Campaign.deserialize(blob);
+    expect(back.buildOf(0).fit.engine).toBeUndefined();
+    expect(back.inventory).toHaveLength(0);
+    expect(back.garage.every((b) => b.chassis !== 'ghost_car')).toBe(true);
+  });
+  it('two players never roll out in the same vehicle', () => {
+    const c = new Campaign();
+    c.players[1].vehicle = c.players[0].vehicle;
+    c.settleActives();
+    expect(c.players[0].vehicle).not.toBe(c.players[1].vehicle);
+  });
+  it('a full inventory breaks new parts down for scrap instead of dropping them', () => {
+    const c = new Campaign();
+    const cap = c.inventoryCap;
+    for (let i = 0; i < cap; i++) expect(c.addPart(newPart('eng_i4')).stored).toBe(true);
+    const before = c.stocks.scrap;
+    const r = c.addPart(newPart('eng_v8'));
+    expect(r.stored).toBe(false);
+    expect(c.stocks.scrap).toBe(before + r.scrap);
+    expect(c.inventory).toHaveLength(cap);
+  });
+  it('trimming an over-full yard scraps the least useful spare and never an active vehicle', () => {
+    const c = new Campaign();
+    for (let i = 0; i < 8; i++) c.adopt(newBuild(i % 2 ? 'hatch' : 'pickup', { seed: i + 20 }));
+    const active = [c.players[0].vehicle, c.players[1].vehicle];
+    const out = c.trimGarage();
+    expect(c.garage.length).toBe(6);
+    expect(out.length).toBe(4);
+    for (const u of active) expect(c.buildByUid(u)).toBeDefined();
+    // The hatchbacks are worth less than the pickups, so they go first.
+    expect(c.garage.filter((b) => b.chassis === 'hatch').length).toBeLessThan(4);
   });
   it('only living, undeserted crew count', () => {
     const c = new Campaign();

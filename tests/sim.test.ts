@@ -10,7 +10,7 @@ import {
   type Stocks,
 } from '../src/data';
 import { Rng } from '../src/core/rng';
-import { canAfford, checkTierUp, effectiveStats, emptyModules, newStocks, spend, splitLoot, gain } from '../src/sim/resources';
+import { canAfford, checkTierUp, newStocks, spend, splitLoot, gain } from '../src/sim/resources';
 import {
   applyLoyalty,
   campVerdict,
@@ -95,14 +95,6 @@ describe('resource ledger', () => {
     expect(checkTierUp(rich, 2, 1, false).ok).toBe(true);
     expect(checkTierUp(rich, 3, 1, true).reason).toMatch(/Beta/);
     expect(checkTierUp(newStocks(), 1, 0, false).ok).toBe(false);
-  });
-  it('module levels scale stats', () => {
-    const m = emptyModules();
-    m.engine = 3;
-    m.armor = 2;
-    const s = effectiveStats(2, m);
-    expect(s.forceMult).toBeCloseTo(1.24);
-    expect(s.armor).toBeCloseTo(0.25);
   });
 });
 

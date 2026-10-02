@@ -7,10 +7,13 @@ const key = (cx: number, cz: number) => (cx + 4096) * 8192 + (cz + 4096);
 export class ObstacleIndex {
   private cells = new Map<number, Aabb[]>();
   private all = new Map<number, Aabb>();
+  /** Terrain height, so segment tests can take heights above the ground instead of absolute ones. */
+  ground: ((x: number, z: number) => number) | null = null;
 
   add(a: Aabb) {
     if (this.all.has(a.id)) return;
     this.all.set(a.id, a);
+    a.gy = this.ground ? this.ground((a.minX + a.maxX) / 2, (a.minZ + a.maxZ) / 2) : 0;
     for (let cx = Math.floor(a.minX / CELL); cx <= Math.floor(a.maxX / CELL); cx++) {
       for (let cz = Math.floor(a.minZ / CELL); cz <= Math.floor(a.maxZ / CELL); cz++) {
         const k = key(cx, cz);
@@ -56,10 +59,12 @@ export class ObstacleIndex {
   }
 
   /** Push a circle out of any box it overlaps. Returns the box it hit (if any) so zombies can attack barricades. */
-  resolveCircle(p: { x: number; z: number }, r: number, ignoreKinds?: Set<string>): Aabb | null {
+  resolveCircle(p: { x: number; z: number }, r: number, ignoreKinds?: Set<string>, y?: number): Aabb | null {
     let hit: Aabb | null = null;
     this.near(p.x, p.z, r + 1, (a) => {
       if (ignoreKinds?.has(a.kind)) return;
+      // Walls of an upper storey don't stop someone on the ground floor, and vice versa.
+      if (y !== undefined && (a.y0 > y + 1.7 || a.y1 < y - 0.2)) return;
       const cx = Math.max(a.minX, Math.min(p.x, a.maxX));
       const cz = Math.max(a.minZ, Math.min(p.z, a.maxZ));
       const dx = p.x - cx;
@@ -88,7 +93,7 @@ export class ObstacleIndex {
     return hit;
   }
 
-  /** True if the open segment crosses any box tall enough to block (`y` in world metres). */
+  /** True if the open segment crosses any box tall enough to block (`y` in metres above the ground). */
   segmentBlocked(ax: number, az: number, bx: number, bz: number, y = 1.2, ignoreKinds?: Set<string>): boolean {
     return this.segmentFirst(ax, az, bx, bz, y, ignoreKinds) !== null;
   }
@@ -101,7 +106,9 @@ export class ObstacleIndex {
     const mz = (az + bz) / 2;
     this.near(mx, mz, len / 2 + 2, (a) => {
       if (ignoreKinds?.has(a.kind)) return;
-      if (y < a.y0 || y > a.y1) return;
+      // `y` is a height above the ground; boxes are placed in absolute heights.
+      const yy = y + (a.gy ?? 0);
+      if (yy < a.y0 || yy > a.y1) return;
       const t = segBox(ax, az, bx, bz, a);
       if (t !== null && (!best || t < best.t)) best = { a, t };
     });

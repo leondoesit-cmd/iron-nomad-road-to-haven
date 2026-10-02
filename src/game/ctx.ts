@@ -12,6 +12,7 @@ import type { Stocks } from '../data';
 import type { Player } from './player';
 import type { Vehicle } from './vehicle';
 import type { ZombieSystem } from './zombies';
+import type { WildlifeSystem } from './wildlife';
 import type { RaiderSystem } from './raiders';
 import type { CrewSystem } from './crew';
 import type { Combat } from './combat';
@@ -19,8 +20,22 @@ import type { AudioEngine } from '../audio/audio';
 import type { InteractRegistry } from './interact';
 import type { Projectiles } from './projectiles';
 import type { Aabb } from '../world/layout';
+import type { CarField } from './cars';
+import type { Faction } from './vehicle';
+import type { VehicleBuild } from '../sim/garage';
+import type { Carried, Loose } from '../sim/carry';
 
 export type NoteKind = 'info' | 'good' | 'warn' | 'bad';
+
+/** Parts, fuel cans and oil cans lying about that a player can lift, carry and put down. */
+export interface LooseWorld {
+  /** The nearest liftable thing within `r` metres of a point. `prefer` keeps a hold on one item while it stays in reach. */
+  nearest(x: number, z: number, r: number, prefer?: string): Loose | null;
+  /** Take it out of the world and hand it over. */
+  take(id: string): Carried | null;
+  /** Set something down on the ground. */
+  drop(x: number, z: number, c: Carried): void;
+}
 
 /** The shared world a running scene (a leg or a camp) exposes to every entity and system. */
 export interface Ctx {
@@ -32,7 +47,7 @@ export interface Ctx {
   sig: SignatureGrid;
   obs: ObstacleIndex;
   biome: 'wasteland' | 'city';
-  mode: 'leg' | 'camp';
+  mode: 'leg' | 'camp' | 'delve';
   terrain: TerrainDef | null;
   campaign: Campaign;
   audio: AudioEngine;
@@ -46,15 +61,31 @@ export interface Ctx {
   players: Player[];
   vehicles: Vehicle[];
   zombies: ZombieSystem;
+  /** Herds, packs and flocks of wild animals. */
+  wildlife: WildlifeSystem;
   raiders: RaiderSystem;
   crew: CrewSystem;
   vehicleByCollider: Map<number, Vehicle>;
   interact: InteractRegistry;
   projectiles: Projectiles;
+  /** Abandoned cars and everything that can be done to them. */
+  cars: CarField;
+  /** A vehicle from a build, added to the scene. */
+  spawnVehicle(opts: { build: VehicleBuild; x: number; z: number; yaw: number; ownerIndex: number; faction?: Faction; y?: number; hulk?: boolean }): Vehicle;
+  /** True once the physics ground under a point exists (chunks stream in), so a car can safely be dropped there. */
+  colliderReady?(x: number, z: number): boolean;
+  /** True if a point is inside a building (under its roof line): the camera closes in and rises there. */
+  interiorAt?(x: number, z: number, y: number): boolean;
+  /** Things on the ground that can be carried. Absent where there are none (camp, caves). */
+  loose?: LooseWorld;
+  /** Open the field workbench for a vehicle (set by the game when a UI is available). */
+  openWorkbench?: (p: Player, v: Vehicle) => void;
   /** Remove a barricade (rammed, breached or smashed). */
   breakBarricade(a: Aabb, how: 'ram' | 'charge' | 'smash'): void;
   groundAt(x: number, z: number): number;
   surfaceAt(x: number, z: number): { grip: number; drag: number; name: Surface };
+  /** Water over the ground at a point, or null on dry land. */
+  waterAt(x: number, z: number): { level: number; depth: number; flow?: [number, number] } | null;
   notify(player: number, text: string, kind?: NoteKind): void;
   radio(text: string): void;
   tip(id: string): void;
